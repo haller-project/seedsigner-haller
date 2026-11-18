@@ -73,6 +73,7 @@ class SeedSelectSeedView(View):
                 verify single sig addr or sign message).
     """
     SCAN_SEED = ButtonOption("Scan a seed", SeedSignerIconConstants.QRCODE)
+    SCAN_HANDWRITTEN = ButtonOption("Scan written seed", FontAwesomeIconConstants.CAMERA)
     TYPE_12WORD = ButtonOption("Enter 12-word seed", FontAwesomeIconConstants.KEYBOARD)
     TYPE_24WORD = ButtonOption("Enter 24-word seed", FontAwesomeIconConstants.KEYBOARD)
     TYPE_ELECTRUM = ButtonOption("Enter Electrum seed", FontAwesomeIconConstants.KEYBOARD)
@@ -110,6 +111,10 @@ class SeedSelectSeedView(View):
             button_data.append(ButtonOption(button_str, SeedSignerIconConstants.FINGERPRINT, icon_color="blue"))
         
         button_data.append(self.SCAN_SEED)
+
+        if self.settings.get_value(SettingsConstants.SETTING__HANDWRITTEN_SEEDS) == SettingsConstants.OPTION__ENABLED:
+            button_data.append(self.SCAN_HANDWRITTEN)
+
         button_data.append(self.TYPE_12WORD)
         button_data.append(self.TYPE_24WORD)
 
@@ -143,6 +148,10 @@ class SeedSelectSeedView(View):
             from seedsigner.views.scan_views import ScanView
             return Destination(ScanView)
 
+        elif button_data[selected_menu_num] == self.SCAN_HANDWRITTEN:
+            from seedsigner.views.handwritten_views import HandwrittenScanView
+            return Destination(HandwrittenScanView)
+
         elif button_data[selected_menu_num] in [self.TYPE_12WORD, self.TYPE_24WORD]:
             from seedsigner.views.seed_views import SeedMnemonicEntryView
             if button_data[selected_menu_num] == self.TYPE_12WORD:
@@ -161,6 +170,7 @@ class SeedSelectSeedView(View):
 ****************************************************************************"""
 class LoadSeedView(View):
     SEED_QR = ButtonOption("Scan a SeedQR", SeedSignerIconConstants.QRCODE)
+    SCAN_HANDWRITTEN = ButtonOption("Scan written seed", FontAwesomeIconConstants.CAMERA)
     TYPE_12WORD = ButtonOption("Enter 12-word seed", FontAwesomeIconConstants.KEYBOARD)
     TYPE_24WORD = ButtonOption("Enter 24-word seed", FontAwesomeIconConstants.KEYBOARD)
     TYPE_ELECTRUM = ButtonOption("Enter Electrum seed", FontAwesomeIconConstants.KEYBOARD)
@@ -172,6 +182,9 @@ class LoadSeedView(View):
             self.TYPE_12WORD,
             self.TYPE_24WORD,
         ]
+
+        if self.settings.get_value(SettingsConstants.SETTING__HANDWRITTEN_SEEDS) == SettingsConstants.OPTION__ENABLED:
+            button_data.insert(1, self.SCAN_HANDWRITTEN)
 
         if self.settings.get_value(SettingsConstants.SETTING__ELECTRUM_SEEDS) == SettingsConstants.OPTION__ENABLED:
             button_data.append(self.TYPE_ELECTRUM)
@@ -191,6 +204,10 @@ class LoadSeedView(View):
         if button_data[selected_menu_num] == self.SEED_QR:
             from .scan_views import ScanSeedQRView
             return Destination(ScanSeedQRView)
+
+        elif button_data[selected_menu_num] == self.SCAN_HANDWRITTEN:
+            from .handwritten_views import HandwrittenScanView
+            return Destination(HandwrittenScanView)
         
         elif button_data[selected_menu_num] == self.TYPE_12WORD:
             self.controller.storage.init_pending_mnemonic(num_words=12)

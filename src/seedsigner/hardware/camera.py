@@ -59,7 +59,7 @@ class Camera(Singleton):
             self._video_stream = None
 
 
-    def start_single_frame_mode(self, resolution=(720, 480)):
+    def start_single_frame_mode(self, resolution=(720, 480), framerate=24):
         from picamera import PiCamera, PiCameraError
         if self._video_stream is not None:
             self.stop_video_stream_mode()
@@ -67,14 +67,14 @@ class Camera(Singleton):
             self._picamera.close()
 
         try:
-            self._picamera = PiCamera(resolution=resolution, framerate=24)
+            self._picamera = PiCamera(resolution=resolution, framerate=framerate)
             self._picamera.start_preview()
         except PiCameraError:
             # This error most often occurs because the camera connection is loose
             raise CameraConnectionError()
 
 
-    def capture_frame(self):
+    def capture_frame(self, expand=False):
         if self._picamera is None:
             raise Exception("Must call start_single_frame_mode first.")
 
@@ -90,7 +90,7 @@ class Camera(Singleton):
 
         # "Rewind" the stream to the beginning so we can read its content
         stream.seek(0)
-        return Image.open(stream).rotate(90 + self._camera_rotation)
+        return Image.open(stream).rotate(90 + self._camera_rotation, expand=expand)
 
 
     def stop_single_frame_mode(self):

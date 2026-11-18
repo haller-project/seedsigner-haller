@@ -235,6 +235,20 @@ class TestHandwritingFlows(FlowTest):
         ])
 
 
+    def test_reading_failure_line_count(self):
+        """
+        A list with an invalid number of words is passed on to the failure screen, which
+        then gives the number of words found.
+        """
+        def check_line_count(view: handwritten_views.HandwrittenReadFailedView):
+            assert view.line_count == 11 and not view.at_edge
+
+        self.run_sequence(self.scan_steps(WordsNotFound("11 lines found", line_count=11)) + [
+            FlowStep(handwritten_views.HandwrittenReadFailedView, before_run=check_line_count, button_data_selection=handwritten_views.HandwrittenReadFailedView.CANCEL),
+            FlowStep(MainMenuView),
+        ])
+
+
     def test_scan_back_button(self):
         self.run_sequence([
             FlowStep(MainMenuView, button_data_selection=MainMenuView.SEEDS),
@@ -311,16 +325,16 @@ class TestHandwrittenScanScreen(HandwrittenScreenTestBase):
         from seedsigner.gui.screens.handwritten_screens import HandwrittenScanScreen
         photo = make_photo()
         mock_camera = MagicMock()
-        mock_camera.read_video_stream.return_value = Image.new("RGBA", (240, 240))
+        mock_camera.read_single_frame_preview.return_value = Image.new("RGB", (240, 320))
         mock_camera.capture_frame.return_value = photo
 
         # Opening click still held, then released, then a new click
         screen = self.build_screen(mock_camera, left_script=[], anyclick_script=[True, True, False, True])
-        with patch("seedsigner.gui.screens.handwritten_screens.time.sleep"):
-            result = screen._run()
+        result = screen._run()
 
         assert result is photo
-        mock_camera.stop_video_stream_mode.assert_called_once()
+        # The preview and the photo come from the same camera mode: no switch at the click
+        mock_camera.start_video_stream_mode.assert_not_called()
         mock_camera.start_single_frame_mode.assert_called_once_with(
             resolution=HandwrittenScanScreen.PHOTO_RESOLUTION,
             framerate=HandwrittenScanScreen.PHOTO_FRAMERATE,
@@ -334,7 +348,7 @@ class TestHandwrittenScanScreen(HandwrittenScreenTestBase):
         screen = self.build_screen(mock_camera, left_script=[True], anyclick_script=[])
 
         assert screen._run() == RET_CODE__BACK_BUTTON
-        mock_camera.stop_video_stream_mode.assert_called_once()
+        mock_camera.stop_single_frame_mode.assert_called_once()
         mock_camera.capture_frame.assert_not_called()
 
 

@@ -79,10 +79,12 @@ class WordsNotFound(Exception):
         No card was found on the photo, and no list with a valid number of lines.
         `at_edge`: the ink of the list reaches the edge of the photo, so lines are
         probably cut off by the frame.
+        `line_count`: number of lines found in the list, if any.
     """
-    def __init__(self, message: str, at_edge: bool = False):
+    def __init__(self, message: str, at_edge: bool = False, line_count: int = 0):
         super().__init__(message)
         self.at_edge = at_edge
+        self.line_count = line_count
 
 
 
@@ -931,7 +933,7 @@ def list_layout(photo: Image.Image, half: Image.Image) -> WordLayout:
     columns = find_lines(page, ink) if ink is not None else []
     count = sum(len(c) for c in columns)
     if count not in SEED_LENGTHS:
-        raise WordsNotFound(f"{count} lines found", at_edge=at_edge)
+        raise WordsNotFound(f"{count} lines found", at_edge=at_edge, line_count=count)
     boxes = []
     for column in columns:  # numbers removed column by column (each column has its own alignment)
         boxes += [(x, b[1], b[2], b[3]) if x is not None and b[0] < x < b[2] else b

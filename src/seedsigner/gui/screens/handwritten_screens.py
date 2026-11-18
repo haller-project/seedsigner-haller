@@ -5,7 +5,7 @@ from gettext import gettext as _
 from typing import Callable
 from PIL import Image
 
-from seedsigner.gui.components import Fonts, GUIConstants, resize_image_to_fill
+from seedsigner.gui.components import Fonts, GUIConstants
 from seedsigner.hardware.buttons import HardwareButtonsConstants
 from seedsigner.hardware.camera import Camera
 from seedsigner.helpers.l10n import mark_for_translation as _mft
@@ -21,15 +21,17 @@ class HandwrittenScanScreen(BaseScreen):
     Live camera preview to frame the handwritten words. A click takes a still photo at
     the full resolution of the camera and returns it as a PIL Image; KEY_LEFT returns
     RET_CODE__BACK_BUTTON.
+
+    The preview comes from the camera that takes the photo and shows its whole field of
+    view, so the photo is the framed image, taken without delay after the click.
     """
     # Full resolution of the OV5647 sensor; the sensor only provides it at up to 15fps,
     # and the framerate also caps the exposure time (1/15s instead of 1/24s in dim light).
     PHOTO_RESOLUTION = (2592, 1944)
     PHOTO_FRAMERATE = 15
 
-    # Time for the auto exposure and white balance to settle before
-    # `Camera.capture_frame()` locks them.
-    PHOTO_SETTLE_SECONDS = 2
+    # Size of the preview frames, before rotation (4:3 like the photo)
+    PREVIEW_RESOLUTION = (320, 240)
 
 
     def __post_init__(self):
@@ -37,10 +39,7 @@ class HandwrittenScanScreen(BaseScreen):
 
         self.camera = Camera.get_instance()
 
-        # Square frames fill the square display edge-to-edge (see
-        # ToolsImageEntropyLivePreviewScreen).
-        max_dimension = max(self.canvas_width, self.canvas_height)
-        self.camera.start_video_stream_mode(resolution=(max_dimension, max_dimension), framerate=12, format="rgb")
+        self.camera.start_single_frame_mode(resolution=self.PHOTO_RESOLUTION, framerate=self.PHOTO_FRAMERATE)
 
         self.instructions_font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.get_button_font_size())
 
@@ -62,8 +61,6 @@ class HandwrittenScanScreen(BaseScreen):
 
     def _capture_photo(self) -> Image.Image:
         try:
-            self.camera.start_single_frame_mode(resolution=self.PHOTO_RESOLUTION, framerate=self.PHOTO_FRAMERATE)
-            time.sleep(self.PHOTO_SETTLE_SECONDS)
             # expand: the photo keeps the whole field of view once rotated to portrait
             return self.camera.capture_frame(expand=True)
         finally:
@@ -79,7 +76,7 @@ class HandwrittenScanScreen(BaseScreen):
             if self.hw_inputs.check_for_low(HardwareButtonsConstants.KEY_LEFT):
                 # Have to manually update last input time since we're not in a wait_for loop
                 self.hw_inputs.update_last_input_time()
-                self.camera.stop_video_stream_mode()
+                self.camera.stop_single_frame_mode()
                 return RET_CODE__BACK_BUTTON
 
             if not self.hw_inputs.check_for_low(keys=HardwareButtonsConstants.KEYS__ANYCLICK):
@@ -87,7 +84,6 @@ class HandwrittenScanScreen(BaseScreen):
 
             elif not is_maybe_still_holding:
                 self.hw_inputs.update_last_input_time()
-                self.camera.stop_video_stream_mode()
 
                 with self.renderer.lock:
                     self._render_instructions(_("Capturing image..."), GUIConstants.ACCENT_COLOR)
@@ -95,14 +91,14 @@ class HandwrittenScanScreen(BaseScreen):
 
                 return self._capture_photo()
 
-            frame = self.camera.read_video_stream(as_image=True)
-            if frame is None:
-                # Camera probably isn't ready yet
-                time.sleep(0.01)
-                continue
+            frame = self.camera.read_single_frame_preview(self.PREVIEW_RESOLUTION)
 
+            # The whole frame, fitted to the display height, so that nothing outside of
+            # the preview is in the photo
+            width = round(frame.width * self.canvas_height / frame.height)
             with self.renderer.lock:
-                self.renderer.canvas.paste(resize_image_to_fill(frame, self.canvas_width, self.canvas_height))
+                self.renderer.draw.rectangle((0, 0, self.canvas_width, self.canvas_height), fill=GUIConstants.BACKGROUND_COLOR)
+                self.renderer.canvas.paste(frame.resize((width, self.canvas_height)), ((self.canvas_width - width) // 2, 0))
                 self._render_instructions("< " + _("back") + "  |  " + _("click a button"), GUIConstants.BODY_FONT_COLOR)
                 self.renderer.show_image()
 

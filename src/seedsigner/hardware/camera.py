@@ -16,6 +16,7 @@ class CameraConnectionError(Exception):
 class Camera(Singleton):
     _video_stream = None
     _picamera = None
+    _preview_frames = None
     _camera_rotation = None
 
     @classmethod
@@ -93,7 +94,30 @@ class Camera(Singleton):
         return Image.open(stream).rotate(90 + self._camera_rotation, expand=expand)
 
 
+    def read_single_frame_preview(self, resolution=(320, 240)):
+        """
+        Returns a downscaled frame of the camera opened by start_single_frame_mode, with
+        the same field of view as `capture_frame()`, so that the still matches the preview.
+        """
+        if self._picamera is None:
+            raise Exception("Must call start_single_frame_mode first.")
+        if self._preview_frames is None:
+            self._preview_stream = io.BytesIO()
+            self._preview_frames = self._picamera.capture_continuous(
+                self._preview_stream, format="rgb", use_video_port=True, resize=resolution)
+            self._preview_resolution = resolution
+
+        next(self._preview_frames)
+        frame = Image.frombytes("RGB", self._preview_resolution, self._preview_stream.getvalue())
+        self._preview_stream.seek(0)
+        self._preview_stream.truncate()
+        return frame.rotate(90 + self._camera_rotation, expand=True)
+
+
     def stop_single_frame_mode(self):
+        if self._preview_frames is not None:
+            self._preview_frames.close()
+            self._preview_frames = None
         if self._picamera is not None:
             self._picamera.close()
             self._picamera = None

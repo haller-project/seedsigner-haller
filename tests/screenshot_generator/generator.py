@@ -480,6 +480,7 @@ def generate_screenshots(locale):
                 ScreenshotConfig(handwritten_views.HandwrittenReadView, dict(photo=None)),
                 ScreenshotConfig(handwritten_views.HandwrittenReadFailedView),
                 ScreenshotConfig(handwritten_views.HandwrittenReadFailedView, dict(at_edge=True), screenshot_name="HandwrittenReadFailedView_at_edge"),
+                ScreenshotConfig(handwritten_views.HandwrittenReadFailedView, dict(line_count=11), screenshot_name="HandwrittenReadFailedView_line_count"),
                 ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_valid), screenshot_name="HandwrittenStatusView_valid"),
                 ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_uncertain), screenshot_name="HandwrittenStatusView_uncertain"),
                 ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_invalid), screenshot_name="HandwrittenStatusView_invalid"),

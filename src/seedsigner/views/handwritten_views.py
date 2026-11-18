@@ -79,7 +79,7 @@ class HandwrittenReadView(View):
         try:
             reading = self.run_screen(HandwrittenReadingScreen, read_function=read_function)
         except WordsNotFound as e:
-            return Destination(HandwrittenReadFailedView, view_args={"at_edge": e.at_edge}, skip_current_view=True)
+            return Destination(HandwrittenReadFailedView, view_args={"at_edge": e.at_edge, "line_count": e.line_count}, skip_current_view=True)
 
         return Destination(HandwrittenStatusView, view_args={"review": HandwrittenReview(reading)}, skip_current_view=True)
 
@@ -88,19 +88,24 @@ class HandwrittenReadView(View):
 class HandwrittenReadFailedView(View):
     """
     `at_edge`: the words reach the edge of the photo, so some are probably cut off.
+    `line_count`: number of words found, when it is not a valid seed length.
     """
     RETAKE = ButtonOption("Retake photo", FontAwesomeIconConstants.CAMERA)
     CANCEL = ButtonOption("Cancel")
 
-    def __init__(self, at_edge: bool = False):
+    def __init__(self, at_edge: bool = False, line_count: int = 0):
         super().__init__()
         self.at_edge = at_edge
+        self.line_count = line_count
 
 
     def run(self):
         if self.at_edge:
             status_headline = _("Words cut off")
             text = _("Move the camera back so all the words fit in the photo.")
+        elif self.line_count:
+            status_headline = _("{} words found").format(self.line_count)
+            text = _("A seed has 12, 15, 18, 21 or 24 words. Check that none is missing.")
         else:
             status_headline = _("Words not found")
             text = _("Fit all the words in the photo, with good light and no blur.")

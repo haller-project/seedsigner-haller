@@ -8,7 +8,8 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from PIL import ImageFont
+from PIL import Image, ImageDraw, ImageFont
+from types import SimpleNamespace
 from unittest.mock import Mock, patch, MagicMock
 
 from embit.psbt import PSBT, OutputScope
@@ -42,7 +43,7 @@ from seedsigner.models.seed import Seed
 from seedsigner.models.settings import Settings
 from seedsigner.models.settings_definition import SettingsConstants, SettingsDefinition
 from seedsigner.views import (MainMenuView, PowerOptionsView, RestartView, RemoveMicroSDWarningView, NotYetImplementedView, UnhandledExceptionView, 
-    psbt_views, seed_views, settings_views, tools_views, scan_views)
+    handwritten_views, psbt_views, seed_views, settings_views, tools_views, scan_views)
 from seedsigner.views.screensaver import OpeningSplashView
 from seedsigner.views.view import CameraConnectionErrorView, NetworkMismatchErrorView, OptionDisabledView, PowerOffView
 
@@ -117,6 +118,28 @@ seed_24 = Seed(mnemonic=mnemonic_24, passphrase="some-PASS*phrase9", wordlist_la
 seed_24_w_passphrase = Seed(mnemonic=mnemonic_24, passphrase="some-PASS*phrase9", wordlist_language_code=SettingsConstants.WORDLIST_LANGUAGE__ENGLISH)
 
 MULTISIG_WALLET_DESCRIPTOR = """wsh(sortedmulti(1,[22bde1a9/48h/1h/0h/2h]tpubDFfsBrmpj226ZYiRszYi2qK6iGvh2vkkghfGB2YiRUVY4rqqedHCFEgw12FwDkm7rUoVtq9wLTKc6BN2sxswvQeQgp7m8st4FP8WtP8go76/{0,1}/*,[73c5da0a/48h/1h/0h/2h]tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/{0,1}/*))#3jhtf6yx"""
+
+class HandwrittenReadingStub:
+    """ Stands in for the reading returned by `seedsigner.helpers.handwriting.read_seed` """
+    def __init__(self, status: str, uncertain: dict[int, list[str]]):
+        word_image = Image.new("L", (150, 40), 255)
+        ImageDraw.Draw(word_image).text((8, 4), mnemonic_12[0], fill=0, font=ImageFont.load_default(size=28))
+        self.words = [SimpleNamespace(image=word_image)] * len(mnemonic_12)
+        self.analysis = SimpleNamespace(
+            mnemonic=mnemonic_12,
+            status=status,
+            uncertain=uncertain,
+            options=lambda k, n=3: [(mnemonic_12[k], 0.86), ("form", 0.09), ("found", 0.03)],
+        )
+
+    def analyze(self, confirmed: dict[int, str] = None):
+        return self.analysis
+
+handwritten_review_valid = handwritten_views.HandwrittenReview(HandwrittenReadingStub("valid", {}))
+handwritten_review_uncertain = handwritten_views.HandwrittenReview(HandwrittenReadingStub("uncertain", {0: ["form"], 5: ["sight"]}))
+handwritten_review_uncertain.confirmed[5] = mnemonic_12[5]
+handwritten_review_invalid = handwritten_views.HandwrittenReview(HandwrittenReadingStub("invalid", {0: ["form"]}))
+
 
 # Grab the most recent release version info for the "release build" splash screenshots.
 (latest_release_version_name, latest_release_version_timestamp) = VersionUtils._fetch_latest_seedsigner_release_tag()
@@ -452,6 +475,18 @@ def generate_screenshots(locale):
                 ScreenshotConfig(seed_views.SeedSignMessageConfirmAddressView),
 
                 ScreenshotConfig(seed_views.SeedElectrumMnemonicStartView),
+            ],
+            "Handwritten Seed Views": [
+                ScreenshotConfig(handwritten_views.HandwrittenReadView, dict(photo=None)),
+                ScreenshotConfig(handwritten_views.HandwrittenReadFailedView),
+                ScreenshotConfig(handwritten_views.HandwrittenReadFailedView, dict(at_edge=True), screenshot_name="HandwrittenReadFailedView_at_edge"),
+                ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_valid), screenshot_name="HandwrittenStatusView_valid"),
+                ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_uncertain), screenshot_name="HandwrittenStatusView_uncertain"),
+                ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_invalid), screenshot_name="HandwrittenStatusView_invalid"),
+                ScreenshotConfig(handwritten_views.HandwrittenReviewView, dict(review=handwritten_review_uncertain)),
+                ScreenshotConfig(handwritten_views.HandwrittenWordView, dict(review=handwritten_review_uncertain, word_index=0)),
+                ScreenshotConfig(handwritten_views.HandwrittenWordEntryView, dict(review=handwritten_review_uncertain, word_index=0)),
+                ScreenshotConfig(handwritten_views.HandwrittenInvalidView),
             ],
             "PSBT Views": [
                 ScreenshotConfig(psbt_views.PSBTSelectSeedView, mock_context_manager=mock_controller_psbt_seed_empty),

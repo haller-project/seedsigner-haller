@@ -10,3 +10,6 @@ src/seedsigner/models/settings_definition.json
 
 *.po
 *.mo
+
+# Native library of the handwriting reader (built with make)
+src/seedsigner/helpers/handwriting/native/libhandwriting.so

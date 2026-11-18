@@ -1,0 +1,154 @@
+"""
+    Word image normalization.
+
+    Turns the crop of one handwritten line (grayscale, any size, possibly with
+    ruled or printed lines and bits of the neighboring lines) into the input of
+    the word recognizer: an ink map of fixed height, 0 for paper and 255 for ink.
+
+    The same function is used to build the training data, so any change here
+    requires retraining the model.
+"""
+import numpy as np
+from PIL import Image
+
+INPUT_HEIGHT = 32
+MAX_INPUT_WIDTH = 256
+
+# Lines are reduced to at most this height before processing
+WORKING_HEIGHT = 64
+
+
+
+def box_mean(a: np.ndarray, radius: int) -> np.ndarray:
+    """
+        Mean over a (2r+1) x (2r+1) window, edges replicated (integral image).
+    """
+    k = 2 * radius + 1
+    p = np.pad(a, radius + 1, mode="edge").astype(np.float64)
+    s = p.cumsum(0).cumsum(1)
+    total = s[k:, k:] - s[:-k, k:] - s[k:, :-k] + s[:-k, :-k]
+    return (total / (k * k))[:a.shape[0], :a.shape[1]].astype(np.float32)
+
+
+
+def remove_long_runs(mask: np.ndarray, min_length: int) -> np.ndarray:
+    """
+        Removes horizontal runs of ink longer than `min_length`: ruled lines and
+        printed lines, even slightly tilted (each row then holds a long piece).
+        Letter strokes are much shorter.
+    """
+    starts = mask.copy()
+    starts[:, 1:] &= ~mask[:, :-1]
+    run_ids = np.cumsum(starts.ravel()).reshape(mask.shape) * mask
+    lengths = np.bincount(run_ids.ravel())
+    lengths[0] = 0
+    return mask & ~(lengths >= min_length)[run_ids]
+
+
+
+def text_rows(mask: np.ndarray) -> tuple[int, int] | None:
+    """
+        Rows of the main line of text: the heaviest block of consecutive inked
+        rows, extended while ink continues (ascenders, descenders). Pieces of the
+        neighboring lines above and below are left out.
+    """
+    profile = mask.sum(1)
+    if profile.max() == 0:
+        return None
+    active = np.append(profile > max(2, 0.08 * profile.max()), False)
+    blocks, start = [], None
+    for y, on in enumerate(active):
+        if on and start is None:
+            start = y
+        elif not on and start is not None:
+            if blocks and start - blocks[-1][1] <= 2:
+                blocks[-1][1] = y
+            else:
+                blocks.append([start, y])
+            start = None
+    if not blocks:
+        return None
+    y0, y1 = max(blocks, key=lambda b: profile[b[0]:b[1]].sum())
+    while y0 > 0 and profile[y0 - 1] > 0:
+        y0 -= 1
+    while y1 < len(profile) and profile[y1] > 0:
+        y1 += 1
+    return y0, y1
+
+
+
+def word_columns(mask: np.ndarray, height: int) -> np.ndarray | None:
+    """
+        Inked columns of the word: groups of columns separated by gaps wider than
+        the line height; groups holding less than 3% of the ink (stray marks,
+        remains of a printed line) are dropped. None if no group is left (only
+        scattered specks).
+    """
+    ink_per_column = mask.sum(0)
+    columns = np.nonzero(ink_per_column)[0]
+    groups = np.split(columns, np.nonzero(np.diff(columns) > height)[0] + 1)
+    total = ink_per_column.sum()
+    kept = [g for g in groups if ink_per_column[g].sum() >= 0.03 * total]
+    return np.concatenate(kept) if kept else None
+
+
+
+def normalize_word(line: Image.Image) -> np.ndarray | None:
+    """
+        Returns the ink map (uint8, INPUT_HEIGHT x width, width <= MAX_INPUT_WIDTH)
+        of the word written on `line`, or None if no ink is found.
+    """
+    found = locate_word(line)
+    return None if found is None else found[0]
+
+
+
+def locate_word(line: Image.Image) -> tuple[np.ndarray, tuple[int, int, int, int]] | None:
+    """
+        normalize_word, also returning the box (left, top, right, bottom) of the
+        word in `line` coordinates.
+    """
+    line = line.convert("L")
+    factor = 1
+    if line.height > WORKING_HEIGHT:
+        factor = -(-line.height // WORKING_HEIGHT)
+        line = line.reduce(factor)
+    a = np.asarray(line, np.float32)
+
+    # Ink relative to the local paper brightness: insensitive to uneven lighting
+    background = box_mean(a, max(4, line.height // 4))
+    ink = np.clip((background - a) / np.maximum(0.5 * background, 1), 0, 1)
+
+    # Ink pixels: threshold adapted to the contrast of the darkest strokes, so
+    # that faint pencil and dark marker are both kept
+    strongest = np.percentile(ink, 99.5)
+    if strongest < 0.08:
+        return None
+    threshold = max(0.06, 0.35 * strongest)
+    mask = ink > threshold
+
+    # Ruled and printed lines, found on a more permissive mask where even a
+    # faint line stays continuous, then removed with one pixel of margin
+    faint = ink > 0.5 * threshold
+    long_runs = faint & ~remove_long_runs(faint, max(24, line.width // 4))
+    long_runs[1:] |= long_runs[:-1]
+    long_runs[:-1] |= long_runs[1:]
+    mask &= ~long_runs
+
+    rows = text_rows(mask)
+    if rows is None:
+        return None
+    y0, y1 = rows
+    height = y1 - y0
+    columns = word_columns(mask[y0:y1], height)
+    if columns is None:
+        return None
+    margin_y, margin_x = int(0.15 * height), int(0.2 * height)
+    y0, y1 = max(0, y0 - margin_y), min(a.shape[0], y1 + margin_y + 1)
+    x0, x1 = max(0, columns[0] - margin_x), min(a.shape[1], columns[-1] + margin_x + 1)
+
+    word = (ink * mask)[y0:y1, x0:x1]
+    width = int(round(word.shape[1] * INPUT_HEIGHT / word.shape[0]))
+    width = min(max(width, 8), MAX_INPUT_WIDTH)
+    resized = Image.fromarray((word * 255).astype(np.uint8)).resize((width, INPUT_HEIGHT), Image.BILINEAR)
+    return np.asarray(resized), (x0 * factor, y0 * factor, x1 * factor, y1 * factor)

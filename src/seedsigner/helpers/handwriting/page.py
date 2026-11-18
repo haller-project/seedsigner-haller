@@ -695,7 +695,8 @@ def text_columns(ink: np.ndarray, corridor: float) -> list[tuple[int, int]]:
         separates two columns. A column whose ink reaches the frame side of the
         mask (list cut by the photo) is dropped if another one remains.
     """
-    lines = line_blocks(ink)
+    # line_blocks finds nothing when the lines touch (tall loops of thin cursive)
+    lines = line_blocks(ink) or line_peaks(ink, 0.25)
     if not lines:
         return []
     line_height = float(np.median([y1 - y0 for y0, y1, _, _ in lines]))

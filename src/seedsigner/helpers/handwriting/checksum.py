@@ -6,7 +6,8 @@
     designates the right one when no other plausible combination passes it.
     The analysis therefore enumerates the plausible combinations, keeps the
     valid ones, and marks as uncertain the positions where another valid seed is
-    almost as probable as the best one, or where the chosen word is unlikely.
+    almost as probable as the best one, or where the chosen word is unlikely;
+    every word is uncertain when the seed is invalid or itself improbable.
 """
 import hashlib
 import math
@@ -34,6 +35,12 @@ MIN_WORD_PROBABILITY = 0.5
 TEMPERATURE = 1.2
 MIN_SEED_PROBABILITY = 0.5
 MIN_CONFIDENT_WORD = 0.95
+
+# A valid seed this improbable is often a chance agreement of misread words
+# with the checksum (1 in 16 for 12 words): a misread word can then have a high
+# probability of its own. Every word not confirmed by the user is then
+# uncertain, as for an invalid seed.
+MIN_PLAUSIBLE_SEED = 0.1
 
 WORD_INDEX = {w: i for i, w in enumerate(bip39.WORDLIST)}
 
@@ -89,6 +96,7 @@ class Analysis:
                 self._mark(k)
         if not valid:
             self.status, self.confidence = "invalid", 0.0
+            self._mark_all()
             return
         for log_p, rival in valid[1:]:
             if valid[0][0] - log_p >= math.log(RIVAL_RATIO):
@@ -97,7 +105,9 @@ class Analysis:
                 if a != b:
                     self._mark(k, b)
         self.confidence = math.exp(valid[0][0])
-        if not self.uncertain and self.confidence < MIN_SEED_PROBABILITY:
+        if self.confidence < MIN_PLAUSIBLE_SEED:
+            self._mark_all()
+        elif not self.uncertain and self.confidence < MIN_SEED_PROBABILITY:
             word_p = [p[w] for p, w in zip(self.readings, self.mnemonic)]
             weak = [k for k, q in enumerate(word_p) if q < MIN_CONFIDENT_WORD] or [word_p.index(min(word_p))]
             for k in weak:
@@ -116,6 +126,16 @@ class Analysis:
             options = [(w, math.log(q)) for w, q in options if q >= MIN_ALTERNATIVE] or [(options[0][0], math.log(options[0][1]))]
             beam = sorted(((log_p + v, words + [w]) for log_p, words in beam for w, v in options), key=lambda b: -b[0])[:BEAM_WIDTH]
         return [b for b in beam if checksum_ok(b[1])]
+
+
+    def _mark_all(self):
+        """
+            Marks as uncertain every position with more than one reading (the
+            words confirmed by the user have a single one).
+        """
+        for k, p in enumerate(self.readings):
+            if len(p) > 1:
+                self._mark(k)
 
 
     def _mark(self, k: int, rival: str = None):

@@ -52,12 +52,26 @@ NUMBER_ENDS = {
 
 # Card search, on the half photo
 CORNERS_TARGET_SIZE = 384    # side of the reduced image used to find the card corners
+MIN_CARD_TILT = 4            # degrees: a card turned more than this is straightened before its corners are found
+MIN_CARD_AREA = 0.03         # share of the photo
+MIN_SURE_CARD_AREA = 0.08    # a smaller card is read with every word uncertain
 CANDIDATE_THRESHOLDS = (0.85, 0.92, 1.0)
 LINES_CHECK_SCALE = 0.35     # scale of the rectification used to look for the printed lines
 MIN_CARD_LINES = 2 / 12      # share of printed lines found above which the photo is a card
-MIN_CARD24_TRY = 0.5         # the 24-word card is tried when the 12-word one finds this share
+MIN_CARD24_TRY = 0.5         # a 12-word card finding all its lines is kept unless the 24-word one finds this share
 LINE_DARKNESS = 6            # darkness of a printed line (gray levels below the local mean)
 FAINT_LINE_DARKNESS = 3      # the same for a blurred photo, if no candidate finds MIN_CARD24_TRY of its lines
+
+# Registration of a card on its printed lines (register_card), on the rectification at LINES_CHECK_SCALE
+REGISTRATION_MARGINS = (0.15, 3)  # room around the card where its lines are looked for: card width share, line spacings
+STRIPS = 6                   # narrow columns along each line where its row is measured
+MIN_STRIPS = 4               # a printed line crosses at least this many of them
+MAX_ROW_SLOPE = 0.25         # slope of the lines on the first rectification
+MIN_LINE_SHARE = 0.5         # a printed line is dark along this share of its right part
+MIN_ROWS = 4                 # printed lines needed to register a card
+MIN_CUT_ROWS = 6             # and to tell that it is cut off by the photo
+MIN_LEFT_COLUMN_LINES = 3    # a 12-word card with this many lines of a left column is a 24-word card
+TEXT_DARKNESS = 0.35         # a row whose 10th percentile of darkness is below this share of the median row: text
 
 # Word crops on a card, in line spacings around the printed line: (top, bottom)
 CARD_BAND = (0.95, 0.3)
@@ -67,7 +81,7 @@ NUMBER_MARGIN = 6
 # Free lists, on the half photo
 LIST_REDUCTION = 2           # further reduction of the half photo for the ink mask
 MIN_PAGE_ANGLE = 0.3         # degrees
-MAX_PAGE_ANGLE = 12
+MAX_PAGE_ANGLE = 30
 LIST_MARGINS = (0.6, 0.35)   # horizontal, vertical margins of a line box, in line heights
 FRAME_BORDER = 6             # pixels of the ink mask left out along the frame
 SHEET_EDGE_DROP = 0.7        # a background darker than this share within ~14 pixels: edge of the sheet
@@ -101,11 +115,13 @@ class WordsNotFound(Exception):
         `at_edge`: the ink of the list reaches the edge of the photo, so lines are
         probably cut off by the frame.
         `line_count`: number of lines found in the list, if any.
+        `card`: the words are those of a card, part of which is out of the photo.
     """
-    def __init__(self, message: str, at_edge: bool = False, line_count: int = 0):
+    def __init__(self, message: str, at_edge: bool = False, line_count: int = 0, card: bool = False):
         super().__init__(message)
         self.at_edge = at_edge
         self.line_count = line_count
+        self.card = card
 
 
 
@@ -123,7 +139,8 @@ class WordLayout:
             one gives no valid seed (a card found on part of its printed lines
             may be a ruled sheet); it raises WordsNotFound if there is none
         complete: False if text is left out of the crops, so that the number
-            of words is uncertain
+            of words is uncertain, or if the card is too small in the photo:
+            no word is then certain unless confirmed
     """
     def __init__(self, kind: str, count: int, orders: list[list[int]], variants: int, crop, outline,
                  alternative=None, complete: bool = True):
@@ -180,10 +197,27 @@ def locate(image: Image.Image, half: Image.Image, step=no_step) -> WordLayout:
     """
     quad, found, kind, threshold = find_card(half, step)
     if found > MIN_CARD_LINES:
+        if found < 1.0 or on_frame(quad, half.size):
+            # card found on part of its lines, or on the frame of the photo: registered on its printed lines
+            registration = register_card(half, quad, kind, threshold)
+            step(CARD_LINES_COST)
+            if kind == "card12":
+                # the right column of a 24-word card partly out of the photo looks like a 12-word card
+                wide = right_column_card24(registration.quad if registration else quad)
+                if left_column_lines(half, wide, threshold) >= MIN_LEFT_COLUMN_LINES:
+                    kind, quad = "card24", wide
+                    registration = register_card(half, quad, kind, threshold)
+                step(CARD_LINES_COST)
+            if registration:
+                if registration.cut and registration.rows >= MIN_CUT_ROWS:
+                    raise WordsNotFound("card cut off by the photo", at_edge=True, card=True)
+                quad = registration.quad
         scale = image.width / half.width
         layout = card_layout(image, [(x * scale, y * scale) for x, y in quad], kind, step, threshold)
         if found < 1.0:
             layout.alternative = lambda: list_layout(image, half, step)
+        # writing this small is read with no certain word
+        layout.complete = bool(quad_area(quad) >= MIN_SURE_CARD_AREA * half.width * half.height)
         return layout
     return list_layout(image, half, step)
 
@@ -197,6 +231,20 @@ def local_mean(a: np.ndarray, radius: int) -> np.ndarray:
     """
     image = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
     return np.asarray(image.filter(ImageFilter.BoxBlur(radius)), np.float32)
+
+
+def local_max(a: np.ndarray, radius: int) -> np.ndarray:
+    """
+        Maximum over a (2r+1) x (2r+1) window, row then column (edges
+        replicated).
+    """
+    for axis in (0, 1):
+        p = np.pad(a, [(radius, radius) if k == axis else (0, 0) for k in range(2)], mode="edge")
+        n = a.shape[axis]
+        a = p[:n].copy() if axis == 0 else p[:, :n].copy()
+        for k in range(1, 2 * radius + 1):
+            np.maximum(a, p[k:k + n] if axis == 0 else p[:, k:k + n], out=a)
+    return a
 
 
 def otsu(values: np.ndarray) -> int:
@@ -222,7 +270,7 @@ def remove_long_strokes(mask: np.ndarray, fraction: float = 0.25) -> np.ndarray:
 def homography(src: list, dst: list) -> np.ndarray:
     """
         Pillow PERSPECTIVE coefficients mapping the points dst (output) to the
-        points src (input).
+        points src (input); least squares fit beyond 4 points.
     """
     a, b = [], []
     for (u, v), (x, y) in zip(dst, src):
@@ -230,7 +278,17 @@ def homography(src: list, dst: list) -> np.ndarray:
         b.append(x)
         a.append([0, 0, 0, u, v, 1, -y * u, -y * v])
         b.append(y)
+    if len(src) > 4:
+        return np.linalg.lstsq(np.array(a, float), np.array(b, float), rcond=None)[0]
     return np.linalg.solve(np.array(a, float), np.array(b, float))
+
+
+def apply_homography(coefficients, points: list) -> list[tuple[float, float]]:
+    """
+        Images of `points` by Pillow PERSPECTIVE coefficients.
+    """
+    a, b, c, d, e, f, g, h = coefficients
+    return [((a * u + b * v + c) / (g * u + h * v + 1), (d * u + e * v + f) / (g * u + h * v + 1)) for u, v in points]
 
 
 
@@ -312,6 +370,52 @@ def area_corners(mask: np.ndarray, reduction: int) -> list | None:
     return [((x + 0.5) * reduction, (y + 0.5) * reduction) for x, y in corners]
 
 
+def mask_corners(mask: np.ndarray, reduction: int) -> list:
+    """
+        Quadrilaterals of the area `mask`: area_corners, and if the main axis
+        of the area is tilted by more than MIN_CARD_TILT degrees (a card turned
+        in the photo), area_corners of the straightened area.
+    """
+    try:
+        quads = [area_corners(mask, reduction)]
+    except ValueError:
+        quads = [None]
+    ys, xs = np.nonzero(mask)
+    if len(xs) < 50:
+        return quads
+    x, y = xs - xs.mean(), ys - ys.mean()
+    # tilt of the main axis from the vertical, or from the horizontal
+    tilt = math.degrees(0.5 * math.atan2(2 * float((x * y).mean()), float((x * x).mean() - (y * y).mean())))
+    tilt = (tilt + 45) % 90 - 45
+    if abs(tilt) >= MIN_CARD_TILT:
+        try:
+            quads.append(turned_corners(mask, reduction, tilt))
+        except ValueError:
+            pass
+    return quads
+
+
+def turned_corners(mask: np.ndarray, reduction: int, tilt: float) -> list | None:
+    """
+        area_corners of `mask` turned by `tilt` degrees, in the coordinates of
+        `mask`.
+    """
+    h, w = mask.shape
+    t = math.radians(tilt)
+    cos, sin = math.cos(t), math.sin(t)
+    size = int(abs(w * cos) + abs(h * sin)) + 2, int(abs(w * sin) + abs(h * cos)) + 2
+    # straightened pixel (u, v) <- mask pixel (cos t (u - cu) - sin t (v - cv) + cx, sin t (u - cu) + cos t (v - cv) + cy)
+    cu, cv, cx, cy = size[0] / 2, size[1] / 2, w / 2, h / 2
+    coefficients = (cos, -sin, cx - cos * cu + sin * cv, sin, cos, cy - sin * cu - cos * cv)
+    straight = Image.fromarray(mask.astype(np.uint8) * 255).transform(size, Image.AFFINE, coefficients, Image.NEAREST)
+    corners = area_corners(np.asarray(straight) > 127, 1)
+    if corners is None:
+        return None
+    a, b, c, d, e, f = coefficients
+    return [((a * (u - 0.5) + b * (v - 0.5) + c + 0.5) * reduction, (d * (u - 0.5) + e * (v - 0.5) + f + 0.5) * reduction)
+            for u, v in corners]
+
+
 def card_ratio() -> float:
     """
         Width / height of the inner area of the 12-word card.
@@ -319,6 +423,14 @@ def card_ratio() -> float:
     p = np.array(CARD_CORNERS["card12"])
     return ((np.hypot(*(p[0] - p[1])) + np.hypot(*(p[3] - p[2])))
             / (np.hypot(*(p[0] - p[3])) + np.hypot(*(p[1] - p[2]))))
+
+
+def quad_area(quad: list) -> float:
+    """
+        Area of a quadrilateral.
+    """
+    p = np.array(quad)
+    return 0.5 * abs(sum(p[i, 0] * p[(i + 1) % 4, 1] - p[(i + 1) % 4, 0] * p[i, 1] for i in range(4)))
 
 
 def plausible(quad: list | None, size: tuple[int, int], ratio: float) -> bool:
@@ -331,8 +443,7 @@ def plausible(quad: list | None, size: tuple[int, int], ratio: float) -> bool:
     side = lambda i, j: np.hypot(*(p[i] - p[j]))
     width = (side(0, 1) + side(3, 2)) / 2
     height = (side(0, 3) + side(1, 2)) / 2
-    area = 0.5 * abs(sum(p[i, 0] * p[(i + 1) % 4, 1] - p[(i + 1) % 4, 0] * p[i, 1] for i in range(4)))
-    if area < 0.08 * size[0] * size[1] or height <= 0:
+    if quad_area(quad) < MIN_CARD_AREA * size[0] * size[1] or height <= 0:
         return False
     return abs(width / height / ratio - 1) < 0.15
 
@@ -364,24 +475,18 @@ def card_candidates(photo: Image.Image, step=no_step):
     light = small > otsu(small)
 
     # first candidate: as found on the blank card for CARD_CORNERS
-    quad = None
+    quads = []
     for mask in (normalized > 0.92 * 128, light):
-        try:
-            quad = area_corners(inner_area(mask), reduction)
-        except ValueError:
-            quad = None
+        quads = mask_corners(inner_area(mask), reduction)
         step(CARD_MASK_COST)
-        if plausible(quad, photo.size, ratio):
+        if any(plausible(quad, photo.size, ratio) for quad in quads):
             break
-    if new(quad):
-        yield quad
-    for k in CANDIDATE_THRESHOLDS:
-        for mask in (normalized > k * 128, (normalized > k * 128) & light):
-            try:
-                quad = area_corners(inner_area(mask), reduction)
-            except ValueError:
-                quad = None
-            step(CARD_MASK_COST)
+    for k in [None] + list(CANDIDATE_THRESHOLDS):
+        if k is not None:
+            quads = [quad for mask in (normalized > k * 128, (normalized > k * 128) & light)
+                     for quad in mask_corners(inner_area(mask), reduction)]
+            step(2 * CARD_MASK_COST)
+        for quad in quads:
             if new(quad):
                 yield quad
 
@@ -452,7 +557,7 @@ def find_card(photo: Image.Image, step=no_step) -> tuple[list | None, float, str
         best = (None, 0.0, "card12", threshold)
         for quad in quads:
             share = {"card12": count_card_lines(photo, quad, "card12", threshold) / 12, "card24": 0.0}
-            if share["card12"] >= MIN_CARD24_TRY:
+            if share["card12"] > MIN_CARD_LINES:
                 share["card24"] = count_card_lines(photo, quad, "card24", threshold) / 24
             step(CARD_LINES_COST)
             kind = "card24" if share["card24"] >= 0.75 else "card12"
@@ -468,6 +573,426 @@ def find_card(photo: Image.Image, step=no_step) -> tuple[list | None, float, str
         if faint[1] >= MIN_CARD24_TRY:
             best = faint
     return best
+
+
+
+
+class CardRegistration:
+    """
+        Result of register_card.
+        quad: corrected quadrilateral of the inner area of the card
+        cut: a word line of the card falls outside the photo
+        rows: number of printed rows found
+    """
+    def __init__(self, quad: list, cut: bool, rows: int):
+        self.quad = quad
+        self.cut = cut
+        self.rows = rows
+
+
+
+def card_rows(darkness: np.ndarray, spans: list, spacing: float, threshold: float) -> tuple[float, list]:
+    """
+        Printed rows of the rectified card `darkness`: in STRIPS narrow columns
+        along each span (x0, x1), rows darker than `threshold`; grouped along
+        the slope that aligns them best (within MAX_ROW_SLOPE), then a line
+        fitted on each group, kept if it crosses at least MIN_STRIPS columns.
+        Returns (xc, [(y at xc, slope, [columns])]), rows top to bottom.
+    """
+    xs, ys = [], []
+    for x0, x1 in spans:
+        half = max(2, int(0.025 * (x1 - x0)))
+        for x in np.linspace(x0, x1, STRIPS):
+            zone = darkness[:, int(x) - half:int(x) + half + 1]
+            k = int(0.3 * (zone.shape[1] - 1))
+            p = np.partition(zone, k, axis=1)[:, k]
+            peaks = np.nonzero((p[1:-1] > threshold) & (p[1:-1] >= p[:-2]) & (p[1:-1] > p[2:]))[0] + 1
+            xs += [float(x)] * len(peaks)
+            ys += peaks.tolist()
+    if len(xs) < MIN_STRIPS:
+        return 0.0, []
+    x, y = np.array(xs), np.array(ys, float)
+    xc = float(x.mean())
+    width = max(3, int(0.15 * spacing)) | 1
+
+    def histogram(slope):
+        c = np.round(y - slope * (x - xc)).astype(int)
+        lo = int(c.min())
+        h = np.convolve(np.bincount(c - lo).astype(float), np.ones(width), mode="same")
+        return h, lo
+
+    slope = max(np.arange(-MAX_ROW_SLOPE, MAX_ROW_SLOPE + 1e-9, 0.01), key=lambda s: float((histogram(s)[0] ** 2).sum()))
+    h, lo = histogram(slope)
+    c = y - slope * (x - xc)
+    rows = []
+    peaks = [m for m in range(len(h)) if h[m] >= MIN_STRIPS and h[m] >= h[max(0, m - 1)] and h[m] >= h[min(len(h) - 1, m + 1)]]
+    for m in sorted(peaks, key=lambda m: -h[m]):
+        if any(abs(m + lo - r[0]) < 0.5 * spacing for r in rows):
+            continue
+        near = np.abs(c - (m + lo)) <= 0.35 * spacing
+        if len(set(x[near].tolist())) < MIN_STRIPS:
+            continue
+        # each line its own slope (the first rectification may leave them fanned out): the line through two
+        # of the peaks that passes closest to a peak in the most columns
+        line = row_line(x[near] - xc, y[near], max(2.0, 0.08 * spacing))
+        if line and len(line[2]) >= MIN_STRIPS and all(abs(line[0] - r[0]) >= 0.5 * spacing for r in rows):
+            rows.append((line[0], line[1], sorted(xc + v for v in line[2])))
+    return xc, sorted(rows)
+
+
+def median_line(t: list, v: list) -> tuple[float, float]:
+    """
+        Theil-Sen line v = a t + b (median of the slopes between pairs of
+        points), robust to a third of outliers; (0, -1e9) for fewer than 2
+        points.
+    """
+    slopes = [(v[j] - v[i]) / (t[j] - t[i]) for i in range(len(t)) for j in range(i + 1, len(t)) if t[j] != t[i]]
+    if not slopes:
+        return 0.0, -1e9
+    a = float(np.median(slopes))
+    return a, float(np.median([y - a * x for x, y in zip(t, v)]))
+
+
+def row_line(x: np.ndarray, y: np.ndarray, tolerance: float) -> tuple[float, float, list] | None:
+    """
+        (y at x = 0, slope, columns) of the line through two of the points
+        (x, y) crossing the most distinct columns x within `tolerance` of a
+        point (then the smallest sum of distances), refined by least squares
+        on them.
+    """
+    dx = x[None, :] - x[:, None]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        slope = np.where(dx != 0, (y[None, :] - y[:, None]) / dx, np.inf)
+    i, j = np.nonzero(np.triu(np.abs(slope) <= MAX_ROW_SLOPE + 0.1, 1))
+    if len(i) == 0:
+        return None
+    s = slope[i, j]
+    distance = np.abs(y[None, :] - (y[i][:, None] + s[:, None] * (x[None, :] - x[i][:, None])))
+    on = distance <= tolerance
+    columns = np.unique(x, return_inverse=True)[1]
+    crossed = (on.astype(np.int32) @ np.eye(columns.max() + 1, dtype=np.int32)[columns] > 0).sum(1)
+    score = crossed * 1e6 - np.where(on, distance, 0).sum(1)
+    on = on[int(np.argmax(score))]
+    slope, intercept = np.polyfit(x[on], y[on], 1)
+    return float(intercept), float(slope), sorted(set(x[on].tolist()))
+
+
+def on_frame(quad: list, size: tuple[int, int]) -> bool:
+    """
+        A corner of `quad` is on the frame of the photo of `size`, or beyond.
+    """
+    return any(min(x, y, size[0] - x, size[1] - y) < 0.01 * max(size) for x, y in quad)
+
+
+def right_column_card24(quad: list) -> list:
+    """
+        Quadrilateral of the 24-word card whose right column is the 12-word
+        card `quad`.
+    """
+    (x0, _, _), (x1, _, _) = CARD_LINES["card12"][0], CARD_LINES["card24"][12]
+    scale = (CARD_LINES["card12"][0][1] - x0) / (CARD_LINES["card24"][12][1] - x1)
+    to_photo = homography(quad, CARD_CORNERS["card12"])
+    return apply_homography(to_photo, [(x0 + (x - x1) * scale, y) for x, y in CARD_CORNERS["card24"]])
+
+
+def left_column_lines(photo: Image.Image, quad: list, threshold: float = LINE_DARKNESS) -> int:
+    """
+        Lines of the left column of the 24-word card `quad` found where
+        expected, with light paper between them and the numbers of the right
+        column (not the border of a neighboring card).
+    """
+    f = LINES_CHECK_SCALE
+    w, h = CARD_SIZE
+    try:
+        coefficients = homography(quad, [(x * f, y * f) for x, y in CARD_CORNERS["card24"]])
+    except np.linalg.LinAlgError:
+        return 0
+    a = np.asarray(photo.transform((int(w * f), int(h * f)), Image.PERSPECTIVE, coefficients, Image.BILINEAR),
+                   np.float32)
+    darkness = local_mean(a, max(4, int(round(15 * f)))) - a
+    spacing = LINE_SPACING * f
+    paper = float(np.percentile(a, 90))
+    found = 0
+    for x0, x1, y in CARD_LINES["card24"][:12]:
+        ya, yb = max(0, int((y - 0.45 * LINE_SPACING) * f)), int((y + 0.45 * LINE_SPACING) * f)
+        line = row_percentile_max(darkness[ya:yb, int((x0 + 0.5 * (x1 - x0)) * f):int((x1 - 0.05 * (x1 - x0)) * f)])
+        gap = a[ya:yb, int((x1 + 8) * f):int((x1 + 56) * f)]
+        found += line > threshold and gap.size > 0 and float(np.median(gap)) > 0.8 * paper
+    return found
+
+
+def register_card(photo: Image.Image, quad: list, kind: str, threshold: float = LINE_DARKNESS,
+                  turn: bool = True, again: bool = True) -> CardRegistration | None:
+    """
+        Corrects `quad` from the printed lines of the card, so that the
+        registration does not depend on the card edges (an edge out of the
+        photo, a card among others): the lines are found around their expected
+        place, numbered by their regular spacing, and the first one is told by
+        the lines missing where the photo shows the card and by the ends of the
+        lines (lines 10 to 12 start further right); if no edge of `quad` is the
+        frame of the photo, also by their place on `quad`. A card upside down
+        is turned. None if fewer than MIN_ROWS lines are found, if they are not
+        spaced and ended as those of a card (ruled sheet, text), or if the
+        first one is not told apart. If lines are missing, the search is done
+        again once on the corrected rectification (`again`); `turn`: False
+        once the card is turned.
+    """
+    f = LINES_CHECK_SCALE
+    w, h = CARD_SIZE
+    mx, my = REGISTRATION_MARGINS[0] * w, REGISTRATION_MARGINS[1] * LINE_SPACING
+    size = (int((w + 2 * mx) * f), int((h + 2 * my) * f))
+    try:
+        to_photo = homography(quad, [((x + mx) * f, (y + my) * f) for x, y in CARD_CORNERS[kind]])
+    except np.linalg.LinAlgError:
+        return None
+    fill = int(np.median(np.asarray(photo.reduce(8))))
+    a = np.asarray(photo.transform(size, Image.PERSPECTIVE, to_photo, Image.BILINEAR, fillcolor=fill), np.float32)
+    darkness = local_mean(a, max(4, int(round(15 * f)))) - a
+    spacing = LINE_SPACING * f
+    # darkness below the paper (local maximum), which handwriting next to a line does not lower
+    smooth = np.asarray(Image.fromarray(np.clip(a, 0, 255).astype(np.uint8)).filter(ImageFilter.BoxBlur(1)), np.float32)
+    below_paper = local_max(smooth, int(0.2 * spacing)) - smooth
+    lines = CARD_LINES[kind]
+    count = 12  # rows of the card; the 24-word card has two lines per row
+    columns = [lines[c * count:(c + 1) * count] for c in range(len(lines) // count)]
+    # right part of the lines, mostly free of handwriting
+    spans = [((col[0][0] + 0.45 * (col[0][1] - col[0][0]) + mx) * f, (col[0][1] - 0.03 * (col[0][1] - col[0][0]) + mx) * f)
+             for col in columns]
+
+    # upside down: ink where the numbers are printed and none after the ends of the lines, on the card turned
+    # rather than as it is
+    def number_contrast(d):
+        def mean(x0, x1, y0, y1):
+            zone = d[int((y0 + my) * f):int((y1 + my) * f), int((x0 + mx) * f):int((x1 + mx) * f)]
+            return float(zone.mean()) if zone.size else 0.0
+        return sum(mean(n - 60, n, y - 0.6 * LINE_SPACING, y) - mean(x1 + 15, x1 + 60, y - 0.6 * LINE_SPACING, y)
+                   for (_, x1, y), n in zip(lines, NUMBER_ENDS[kind]))
+
+    ink = np.clip(darkness, 0, None)
+    if turn and number_contrast(ink[::-1, ::-1]) > max(0.0, 1.5 * number_contrast(ink)):
+        return register_card(photo, quad[2:] + quad[:2], kind, threshold, False, again)
+    xc, rows = card_rows(darkness, spans, spacing, threshold)
+    if len(rows) < 3:
+        return None
+
+    def inside(points):
+        return all(-2 <= x <= photo.width + 2 and -2 <= y <= photo.height + 2
+                   for x, y in apply_homography(to_photo, points))
+
+    in_photo = np.asarray(Image.new("L", photo.size, 255).transform(size, Image.PERSPECTIVE, to_photo,
+                                                                     Image.NEAREST)) > 0
+
+    def end(c, slope, x, direction, limit):
+        """ last column along the row (c, slope) from x darker than the paper (gaps of 2 columns at most);
+            minus the column where the row leaves the photo, if first; None if it is still dark after
+            `limit` columns or leaves the rectification """
+        xx = np.round(x + direction * np.arange(1, int(limit))).astype(int)
+        yy = np.round(c + slope * (xx - xc)).astype(int)
+        valid = (xx >= 0) & (xx < size[0]) & (yy >= 1) & (yy < size[1] - 1)
+        n = int(np.argmin(valid)) if not valid.all() else len(xx)
+        xx, yy = xx[:n], yy[:n]
+        dark = np.maximum(np.maximum(below_paper[yy - 1, xx], below_paper[yy, xx]), below_paper[yy + 1, xx]) > threshold
+        light = ~dark
+        # first run of 3 light columns
+        runs = light[:-2] & light[1:-1] & light[2:] if len(light) > 2 else np.zeros(0, bool)
+        stop = int(np.argmax(runs)) if runs.any() else len(xx)
+        out = ~in_photo[yy, xx]
+        if out[:stop].any():
+            return -int(xx[int(np.argmax(out))])
+        if stop == len(xx):
+            return None
+        before = np.nonzero(dark[:stop])[0]
+        return int(xx[before[-1]]) if len(before) else int(round(x))
+
+    def printed_line(c, slope, xa, xb):
+        """ the row (c, slope) is a thin line from xa to xb: dark along MIN_LINE_SHARE of it, and lighter a
+            fifth of a spacing above and below (not text, not the edge of the card) """
+        xx = np.arange(int(xa), int(xb))
+        yy = np.clip(np.round(c + slope * (xx - xc)).astype(int), 1, size[1] - 2)
+        line = np.maximum(np.maximum(darkness[yy - 1, xx], darkness[yy, xx]), darkness[yy + 1, xx])
+        d = int(round(0.2 * spacing))
+        thin = [float(np.median(below_paper[np.clip(yy + o, 0, size[1] - 1), xx])) for o in (-1, 0, 1)]
+        around = [float(np.median(below_paper[np.clip(yy + o, 0, size[1] - 1), xx])) for o in (-d, d)]
+        return float(np.mean(line > threshold)) >= MIN_LINE_SHARE and max(around) < 0.5 * max(thin)
+
+    def clear_after(j, x):
+        """ paper after the end x of row j, unlike text going on after a space """
+        c, slope, _ = rows[j]
+        xx = np.arange(int(x) + 3, min(size[0], int(x + 0.04 * w * f)))  # before the numbers of a second column
+        if len(xx) == 0:
+            return False
+        yy = np.clip(np.round(c + slope * (xx - xc)).astype(int), 1, size[1] - 2)
+        dark = np.maximum(np.maximum(below_paper[yy - 1, xx], below_paper[yy, xx]), below_paper[yy + 1, xx])
+        return float(np.mean(dark > threshold)) < 0.2
+
+    # ends of the printed lines per row and column (canvas abscissas; None: not found; negative: the row
+    # leaves the photo at minus this abscissa)
+    measured = []
+    for c, slope, strips in rows:
+        row_ends = {}
+        for k, (xa, xb) in enumerate(spans):
+            crossed = [s for s in strips if xa - 1 <= s <= xb + 1]
+            if len(crossed) >= 2 and printed_line(c, slope, xa, xb):
+                length = (columns[k][0][1] - columns[k][0][0]) * f
+                xl = end(c, slope, crossed[0], -1, 0.6 * length)
+                xr = end(c, slope, crossed[-1], 1, 0.3 * length)
+                # a line goes on a little after the last strip, to its end
+                row_ends[k] = [xl if xl is not None and crossed[0] - xl > 0.15 * length else None,
+                               None if xr is not None and 0 < xr - crossed[-1] < 1 else xr]
+        measured.append(row_ends)
+
+    # text is darker than the paper along a smaller share of the row than the printed lines are
+    def low_darkness(c, slope, xa, xb):
+        xx = np.arange(int(xa), int(xb))
+        yy = np.clip(np.round(c + slope * (xx - xc)).astype(int), 1, size[1] - 2)
+        return float(np.percentile(np.maximum(np.maximum(below_paper[yy - 1, xx], below_paper[yy, xx]),
+                                              below_paper[yy + 1, xx]), 10))
+
+    level = [max((low_darkness(c, slope, *spans[k]) for k in e), default=0.0) for (c, slope, _), e in zip(rows, measured)]
+    reference = float(np.median([v for v, e in zip(level, measured) if e] or [0.0]))
+    for v, e in zip(level, measured):
+        if v < TEXT_DARKNESS * reference:
+            e.clear()
+    endless = sum(1 for e in measured if e and all(v[1] is None for v in e.values()))
+    # a row going on beyond the end of the line in one of its columns is text
+    textual = {j for j, e in enumerate(measured) if any(v[1] is None for v in e.values())}
+    # the lines of a column end on a straight line: rows ending elsewhere are text or a card edge; a row
+    # leaving the photo before that line is a line cut by the frame
+    for k, (xa, xb) in enumerate(spans):
+        js = [j for j, e in enumerate(measured) if k in e and e[k][1] is not None and e[k][1] > 0]
+        slope_r, xr0 = median_line([rows[j][0] for j in js], [measured[j][k][1] for j in js])
+        tolerance = 0.03 * (columns[k][0][1] - columns[k][0][0]) * f
+        for j, e in enumerate(measured):
+            xr = e[k][1] if k in e else 0
+            expected = slope_r * rows[j][0] + xr0
+            if k in e and (xr is None or (xr > 0 and (abs(xr - expected) > tolerance or not clear_after(j, xr)))
+                           or (xr < 0 and -xr > expected + tolerance)):
+                del e[k]
+    keep = [j for j, e in enumerate(measured) if e and j not in textual]
+    rows = [rows[j] for j in keep]
+    ends = [(i, k, xl if xl is not None and xl > 0 else None, xr if xr > 0 else None)
+            for i, j in enumerate(keep) for k, (xl, xr) in measured[j].items()]
+    if len(rows) < 3 or endless > len(rows):
+        return None  # lines going on beyond their end: a ruled sheet
+
+    # rows numbered by their spacing, measured between neighbors (it varies with the perspective)
+    c = np.array([r[0] for r in rows])
+    d = np.diff(c)
+    single = d < 1.5 * d.min()
+    centers = (c[:-1] + c[1:]) / 2
+    rel = [0]
+    for i in range(len(d)):
+        near = np.argsort(np.abs(centers[single] - centers[i]))[:2]
+        rel.append(rel[-1] + max(1, int(round(d[i] / float(np.mean(d[single][near]))))))
+    rel = np.array(rel)
+    # too many rows for a card: a first or last row with no end of line found is the frame of the photo
+    while rel[-1] >= count and len(rows) > 3:
+        ended = [any(xr is not None for i, _, _, xr in ends if i == j) for j in (0, len(rows) - 1)]
+        if ended == [True, True]:
+            break
+        j = 0 if not ended[0] else len(rows) - 1
+        rows, c, rel = rows[:j] + rows[j + 1:], np.delete(c, j), np.delete(rel, j)
+        rel = rel - rel[0]
+        ends = [(i - (i > j), k, xl, xr) for i, k, xl, xr in ends if i != j]
+        d = np.diff(c)
+        single = d < 1.5 * d.min()
+        centers = (c[:-1] + c[1:]) / 2
+    if any(abs(d[i] / float(np.mean(d[single][np.argsort(np.abs(centers[single] - centers[i]))[:2]]))
+               - (rel[i + 1] - rel[i])) > 0.35 for i in range(len(d))):
+        return None  # rows off the grid
+    pitch = float(np.median(d[single]))
+    if len(rows) < MIN_ROWS or not 0.65 < pitch / spacing < 1.5:
+        return None  # too few rows, or not spaced as the lines of the card
+
+    def fit(points):
+        """ least squares v = p . (X, Y, 1), outliers beyond 0.02 card width dropped; (p, inliers) """
+        m = np.array([(X, Y, 1.0) for X, Y, _ in points])
+        v = np.array([v for _, _, v in points])
+        kept = np.ones(len(v), bool)
+        if len(set(m[:, 0])) < 2:  # the same template abscissa everywhere: the scale is kept
+            m, v0 = m[:, 1:], v - f * m[:, 0]
+        else:
+            v0 = v
+        for _ in range(3):
+            p = np.linalg.lstsq(m[kept], v0[kept], rcond=None)[0]
+            residuals = np.abs(m @ p - v0)
+            kept = residuals < 0.02 * w * f
+            if kept.sum() < 2:
+                return None, 0
+        if len(p) == 2:
+            p = np.array([f, p[0], p[1]])
+        return p, int(kept.sum())
+
+    # first line: the one leaving the fewest lines missing where the photo shows the card, then the one whose
+    # lines are closest to their place on `quad` if none of its edges is the frame of the photo, then the one
+    # agreeing best with the left ends of the lines
+    ys = [y for _, _, y in lines[:count]]
+    clipped = on_frame(quad, photo.size)
+    position = c / f - my  # rows on the template, as placed by `quad`
+
+    def offset(first):
+        """ distance of the rows numbered from `first` to their place on `quad`; a row off the card counts for
+            two spacings """
+        return sum(abs(p - ys[r + first]) if 0 <= r + first < count else 2 * LINE_SPACING for p, r in zip(position, rel))
+
+    if rel[-1] >= count:
+        # more rows than lines: text at one end, told by `quad`
+        if clipped:
+            return None
+        first = min(range(2 - int(rel[-1]), count - 2), key=offset)
+        on_card = [j for j in range(len(rows)) if 0 <= rel[j] + first < count]
+        if len(on_card) < 3:
+            return None
+        renumber = {j: i for i, j in enumerate(on_card)}
+        ends = [(renumber[j], k, xl, xr) for j, k, xl, xr in ends if j in renumber]
+        rows, c, position = [rows[j] for j in on_card], c[on_card], position[on_card]
+        rel = rel[on_card] - rel[on_card[0]]
+    firsts = range(0, count - rel[-1])
+    results = []
+    for first in firsts:
+        index = rel + first
+        # x: ends of the lines; y: rows (polynomial of Y, slope linear in Y)
+        points = [(lines[index[j] + 12 * k][0], ys[index[j]], xl) for j, k, xl, _ in ends if xl is not None] + \
+                 [(lines[index[j] + 12 * k][1], ys[index[j]], xr) for j, k, _, xr in ends if xr is not None]
+        px, consistent = fit(points)
+        if px is None:
+            continue
+        yy = np.array([ys[i] for i in index], float)
+        py = np.polyfit(yy, c, 2 if len(rows) >= 5 else 1)
+        ps = np.polyfit(yy, [r[1] for r in rows], 1)
+
+        def to_canvas(X, Y, px=px, py=py, ps=ps):
+            x = px[0] * X + px[1] * Y + px[2]
+            return x, float(np.polyval(py, Y) + np.polyval(ps, Y) * (x - xc))
+
+        missing = 0
+        for r in range(count):
+            if r in index:
+                continue
+            row = [to_canvas(x, ys[r]) for x in np.linspace(lines[r][0], lines[r][1], 4)]
+            missing += inside(row)
+        results.append((missing, -consistent, first, to_canvas))
+    if not results:
+        return None
+    results.sort(key=lambda t: (t[0], offset(t[2]) if not clipped else 0, t[1]))
+    best = results[0]
+    # as many lines missing and left ends agreeing: looked for again on the next rectification
+    tie = clipped and len(results) > 1 and results[1][:2] == best[:2]
+    if tie and not again:
+        return None
+    to_canvas = best[3]
+    grid = [(x, y) for y in ys for x in np.linspace(min(x0 for x0, _, _ in lines), max(x1 for _, x1, _ in lines), 4)]
+    to_card = homography(apply_homography(to_photo, [to_canvas(x, y) for x, y in grid]), grid)
+    cut = any(not all(-2 <= x <= photo.width + 2 and -2 <= y <= photo.height + 2 for x, y in
+                      apply_homography(to_card, [(x0, y - 0.7 * LINE_SPACING), (x1, y - 0.7 * LINE_SPACING),
+                                                 (x1, y + 0.1 * LINE_SPACING), (x0, y + 0.1 * LINE_SPACING)]))
+              for x0, x1, y in lines)
+    registration = CardRegistration(apply_homography(to_card, CARD_CORNERS[kind]), cut, len(rows))
+    if again and (tie or len(rows) < count):
+        # lines missed on the first rectification are looked for again on the corrected one
+        second = register_card(photo, registration.quad, kind, threshold, False, False)
+        return second if second or tie else registration
+    return registration
 
 
 def adjust_line(darkness: np.ndarray, x0: int, x1: int, y: int, threshold: float = LINE_DARKNESS) -> int:
@@ -547,9 +1072,7 @@ def card_layout(photo: Image.Image, quad: list, kind: str, step=no_step,
 
     def outline(k):
         x0, y0, x1, y1 = box(k, 0)
-        a, b, c, d, e, f, g, h = coefficients
-        return [((a * u + b * v + c) / (g * u + h * v + 1), (d * u + e * v + f) / (g * u + h * v + 1))
-                for u, v in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
+        return apply_homography(coefficients, ((x0, y0), (x1, y0), (x1, y1), (x0, y1)))
 
     return WordLayout(kind, len(lines), [list(range(len(lines)))], 3, crop, outline)
 
@@ -611,7 +1134,7 @@ def page_angle(ink: np.ndarray) -> float:
     """
         Tilt of the lines of text (degrees): the angle whose vertical shear
         makes the horizontal projection of the ink the most contrasted (sum of
-        squares); 0.5 degree steps, then refined to 0.1 degree.
+        squares); 1.5 degree steps, then refined to 0.5 and 0.1 degree.
     """
     ys, xs = np.nonzero(ink)
     if len(xs) < 200:
@@ -625,7 +1148,8 @@ def page_angle(ink: np.ndarray) -> float:
         p = np.bincount(y, minlength=height).astype(np.float64)
         return float((p * p).sum())
 
-    best = max(np.arange(-MAX_PAGE_ANGLE, MAX_PAGE_ANGLE + 0.01, 0.5), key=score)
+    best = max(np.arange(-MAX_PAGE_ANGLE, MAX_PAGE_ANGLE + 0.01, 1.5), key=score)
+    best = max(np.arange(best - 1.5, best + 1.51, 0.5), key=score)
     return float(max(np.arange(best - 0.5, best + 0.51, 0.1), key=score))
 
 

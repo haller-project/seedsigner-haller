@@ -57,7 +57,7 @@ The engine is `seedsigner.helpers.handwriting`:
 
 | Module | Role |
 |---|---|
-| `page.py` | finds the card (corners, rectification, known line positions) or the lines and columns of a list (rotation, line profiles, word numbers), and cuts out one crop per word; a line box is widened while ink lies just beyond its sides (a letter set apart from the rest of the word, a faint stroke) |
+| `page.py` | finds the card (corners, registration on its printed lines, rectification) or the lines and columns of a list (rotation, line profiles, word numbers), and cuts out one crop per word; a line box is widened while ink lies just beyond its sides (a letter set apart from the rest of the word, a faint stroke) |
 | `preprocess.py` | turns a word crop into an ink map 32 pixels high |
 | `word_model.py` | small convolutional network (about 160 000 parameters, CTC), run in 16-bit integers; two sets of weights, see [The Haller-1 model](#the-haller-1-model) |
 | `decoder.py` | log-likelihood of each of the 2 048 BIP39 words (prefix tree, beam pruning); a line number before the word is accepted |
@@ -116,6 +116,21 @@ On a blurred photo of a card, the printed lines are spread out and lighter;
 when no card candidate shows half of its lines, they are looked for again
 with a lower contrast (3 gray levels instead of 6), which never turns a list
 of the test photos into a card.
+
+The card is first found by the light area inside its border, then
+registered on its printed lines, so that a wrong edge does not shift the
+words: the lines are looked for on a rectification wider than the card,
+numbered by their regular spacing, and the first one is told by the lines
+that should show where the photo covers the card, by the place the card
+edges give when none of them is the frame of the photo, and by the ends of
+the lines (lines 10 to 12 start further right). The card is thus read in
+place when its header or an edge is out of the photo, when it is seen at an
+angle, turned up to 30 degrees or upside down, small in the photo, partly in
+a shadow or under a finger, or among other cards of a printed sheet; the
+right column of a 24-word card is not taken for a 12-word card. When a word
+line of the card is out of the photo, no word is read: the user is asked to
+move the camera back so that the whole card fits. Lists are straightened up
+to 30 degrees.
 
 `read_seed(image, progress, on_word)` reports its progress after every step
 of the page search and of the reading. Each step is weighted by its expected
@@ -269,6 +284,25 @@ low confidence has all its words marked.
 Most failures are lists cut by the frame of the photo. When the ink of a list
 reaches the edge of the photo, the user is asked to move the camera back
 (36 of 39 such photos in the measurement above); otherwise to retake the photo.
+A card with a word line out of the photo is refused the same way ("Card cut
+off").
+
+Framing was measured on 735 other simulated photos (capitals and neat
+cursive; cards and lists cut by the frame, close, far, at an angle, turned,
+upside down, among other cards, under objects and shadows, under uneven
+light), 35 per kind of defect and support. Cards, seeds valid and exact
+before and after the registration on the printed lines, and seeds read with
+words shifted to another place: cut at the top 8 to 15 (shifted 4 to 3),
+cut on a side 11 to 14 (2 to 0), close 18 to 22, turned up to 30 degrees 13
+to 29, upside down 0 to 21, at an angle 15 to 16, under objects 16 to 17
+(shifted 7 to 4), among other cards 21 to 23; far from the camera, 0 to 16
+read exactly, never reported as valid. Lists turned up to 30 degrees: 11 to
+27. No wrong seed is reported as valid on cards (one before); the one wrong
+valid list (cut at the bottom) is unchanged. A whole printed sheet of cards
+in the photo and an upside down list are not read. A card that is found
+whole takes the same path as before; the registration only runs on a card
+found on part of its lines or on the frame of the photo (5 to 6 s more for
+the search on a Pi Zero, where a shifted reading used to take 21 s).
 
 ## Timings
 

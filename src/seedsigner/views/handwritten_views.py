@@ -104,7 +104,7 @@ class HandwrittenReadView(View):
         try:
             reading = self.run_screen(HandwrittenReadingScreen, read_function=read_function)
         except WordsNotFound as e:
-            return Destination(HandwrittenReadFailedView, view_args={"at_edge": e.at_edge, "line_count": e.line_count}, skip_current_view=True)
+            return Destination(HandwrittenReadFailedView, view_args={"at_edge": e.at_edge, "line_count": e.line_count, "card": e.card}, skip_current_view=True)
 
         return Destination(HandwrittenStatusView, view_args={"review": HandwrittenReview(reading)}, skip_current_view=True)
 
@@ -114,18 +114,23 @@ class HandwrittenReadFailedView(View):
     """
     `at_edge`: the words reach the edge of the photo, so some are probably cut off.
     `line_count`: number of words found, when it is not a valid seed length.
+    `card`: the words are those of a seed card, part of which is out of the photo.
     """
     RETAKE = ButtonOption("Retake photo", FontAwesomeIconConstants.CAMERA)
     CANCEL = ButtonOption("Cancel")
 
-    def __init__(self, at_edge: bool = False, line_count: int = 0):
+    def __init__(self, at_edge: bool = False, line_count: int = 0, card: bool = False):
         super().__init__()
         self.at_edge = at_edge
         self.line_count = line_count
+        self.card = card
 
 
     def run(self):
-        if self.at_edge:
+        if self.at_edge and self.card:
+            status_headline = _("Card cut off")
+            text = _("Move the camera back so the whole card fits in the photo.")
+        elif self.at_edge:
             status_headline = _("Words cut off")
             text = _("Move the camera back so all the words fit in the photo.")
         elif self.line_count:

@@ -239,6 +239,20 @@ class TestHandwritingFlows(FlowTest):
         ])
 
 
+    def test_reading_failure_card_cut_off(self):
+        """
+        A seed card partly out of the photo is passed on to the failure screen, which
+        then asks to move the camera back so that the whole card fits.
+        """
+        def check_card(view: handwritten_views.HandwrittenReadFailedView):
+            assert view.at_edge and view.card
+
+        self.run_sequence(self.scan_steps(WordsNotFound("card cut off by the photo", at_edge=True, card=True)) + [
+            FlowStep(handwritten_views.HandwrittenReadFailedView, before_run=check_card, button_data_selection=handwritten_views.HandwrittenReadFailedView.CANCEL),
+            FlowStep(MainMenuView),
+        ])
+
+
     def test_reading_failure_line_count(self):
         """
         A list with an invalid number of words is passed on to the failure screen, which

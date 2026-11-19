@@ -192,3 +192,47 @@ def test_border_connected():
                     reached[v, u] = True
                     queue.append((v, u))
         assert np.array_equal(border_connected(mask), reached)
+
+
+
+def test_local_max():
+    from seedsigner.helpers.handwriting.page import local_max
+    a = np.random.default_rng(1).integers(0, 255, (20, 30)).astype(np.float32)
+    padded = np.pad(a, 2, mode="edge")
+    expected = np.array([[padded[y:y + 5, x:x + 5].max() for x in range(30)] for y in range(20)])
+    assert np.array_equal(local_max(a, 2), expected)
+
+
+
+def test_row_line_ignores_handwriting_peaks():
+    """ the line crossing the most strips is kept, not the strokes of the words around it """
+    from seedsigner.helpers.handwriting.page import row_line
+    x = np.repeat(np.arange(6) * 10.0, 3)
+    strokes = [(14, 27), (25, 16), (13, 26), (27, 15), (16, 24), (24, 13)]
+    y = np.array([[20 + 0.05 * s, *strokes[s]] for s in range(6)]).ravel()
+    intercept, slope, columns = row_line(x, y, 1.0)
+    assert abs(intercept - 20) < 0.01 and abs(slope - 0.005) < 0.001 and len(columns) == 6
+
+
+
+def test_homography_least_squares():
+    from seedsigner.helpers.handwriting.page import apply_homography, homography
+    card = [(0, 0), (100, 0), (100, 140), (0, 140)]
+    photo = [(12, 30), (95, 22), (105, 160), (8, 150)]
+    exact = homography(photo, card)
+    grid = [(x, y) for x in (0, 50, 100) for y in (0, 70, 140)]
+    fitted = homography(apply_homography(exact, grid), grid)
+    assert np.allclose(fitted, exact, atol=1e-9)
+
+
+
+def test_right_column_of_a_24_word_card():
+    """ the lines of the right column of the 24-word card fall on those of the 12-word card `quad` """
+    from seedsigner.helpers.handwriting.page import (CARD_CORNERS, CARD_LINES, apply_homography, homography,
+                                                     right_column_card24)
+    quad = [(100, 80), (500, 90), (510, 650), (90, 640)]
+    wide = right_column_card24(quad)
+    to_photo12, to_photo24 = homography(quad, CARD_CORNERS["card12"]), homography(wide, CARD_CORNERS["card24"])
+    for (_, x12, y12), (_, x24, y24) in zip(CARD_LINES["card12"], CARD_LINES["card24"][12:]):
+        assert np.allclose(apply_homography(to_photo12, [(x12, y12)]), apply_homography(to_photo24, [(x24, y24)]),
+                           atol=1e-6)

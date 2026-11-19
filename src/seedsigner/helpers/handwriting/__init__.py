@@ -241,14 +241,16 @@ class LayoutReader:
 
 def combine(a: list[tuple[str, float]], b: list[tuple[str, float]]) -> list[tuple[str, float]]:
     """
-        Sum of the log-probabilities of two readings of the same word.
+        Sum of the log-probabilities of two readings of the same word. Equal
+        sums keep the order of `a`, then `b`, so that the result does not
+        depend on the hash seed of Python.
     """
     def log_probabilities(candidates):
         top = candidates[0][1]
         total = top + math.log(sum(math.exp(s - top) for _, s in candidates))
         return {w: s - total for w, s in candidates}
     la, lb = log_probabilities(a), log_probabilities(b)
-    combined = {w: la.get(w, FUSION_FLOOR) + lb.get(w, FUSION_FLOOR) for w in set(la) | set(lb)}
+    combined = {w: la.get(w, FUSION_FLOOR) + lb.get(w, FUSION_FLOOR) for w in [*la, *(w for w in lb if w not in la)]}
     return sorted(combined.items(), key=lambda item: -item[1])[:CANDIDATES]
 
 

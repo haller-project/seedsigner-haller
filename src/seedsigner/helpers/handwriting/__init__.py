@@ -9,9 +9,10 @@
     Each word is cut out of the photo (page.py), normalized (preprocess.py),
     read by a small neural network (word_model.py) and scored against the 2 048
     BIP39 words (decoder.py); the checksum then chooses the seed among the
-    plausible readings and flags uncertain words (checksum.py). A seed that is
-    not valid is read again by a second network, trained with more lowercase
-    and cursive writing. The result must always be reviewed by the user against
+    plausible readings and flags uncertain words (checksum.py). The network is
+    Haller-1, made of two sets of weights: a seed that is not valid with the
+    first one is read again by the second one, trained with more lowercase and
+    cursive writing. The result must always be reviewed by the user against
     the paper.
 """
 import math
@@ -39,7 +40,7 @@ STATUS_RANK = {"invalid": 0, "uncertain": 1, "valid": 2}
 # Second network, used when the first one gives no valid seed. Its seeds need
 # a higher probability to be declared valid: it reads the photos the first one
 # failed on, where wrong readings that pass the checksum are more frequent.
-LOWERCASE_MODEL_PATH = MODEL_PATH.replace("word_model.npz", "word_model_lowercase.npz")
+LOWERCASE_MODEL_PATH = MODEL_PATH.replace("haller-1-capitals.npz", "haller-1-lowercase.npz")
 LOWERCASE_MIN_SEED_PROBABILITY = 0.85
 
 # The same photos are also read with a blend of both networks: weighted sum of

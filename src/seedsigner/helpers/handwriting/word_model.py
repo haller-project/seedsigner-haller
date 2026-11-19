@@ -6,10 +6,10 @@
     Output: for every 4 columns, log-probabilities of 37 classes: 0 is the CTC
     blank, 1-26 the letters a-z, 27-36 the digits 0-9.
 
-    The quantized weights (resources/handwriting/word_model.npz) are written by
-    seedsigner_ocr.quantize, which also documents the format. The C library
-    (native/handwriting.c) is used when it has been built; the numpy code below
-    computes bit-identical logits.
+    The quantized weights of the Haller-1 model (resources/handwriting/
+    haller-1-*.npz) are written by haller.quantize, which also documents the
+    format. The C library (native/handwriting.c) is used when it has been
+    built; the numpy code below computes bit-identical logits.
 """
 import ctypes
 import os
@@ -20,7 +20,7 @@ from . import native
 from .preprocess import INPUT_HEIGHT, MAX_INPUT_WIDTH
 
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "resources", "handwriting",
-                          "word_model.npz")
+                          "haller-1-capitals.npz")
 
 LAYERS = ("b1", "b2", "b3", "b4", "t1", "t2")
 

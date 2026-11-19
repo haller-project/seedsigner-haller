@@ -16,7 +16,7 @@
 #define HW_FIRST_DIGIT 27
 
 /*
- * Quantized word network (layout written by seedsigner_ocr.quantize).
+ * Quantized word network (layout written by haller.quantize).
  *   conv 3x3 1->c1, max 2x2 ; conv 3x3 c1->c2, max 2x2 ;
  *   conv 3x3 c2->c3, max (2,1) ; conv 3x3 c3->c3, max (2,1) ;
  *   columns -> vectors of 2*c3 ; conv1d k3 -> hidden ; conv1d k3 dilation 2

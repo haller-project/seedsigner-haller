@@ -1,3 +1,4 @@
+import hashlib
 import os
 import types
 
@@ -11,7 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 from seedsigner.helpers.handwriting import native
 from seedsigner.helpers.handwriting.decoder import ALPHABET, Decoder
 from seedsigner.helpers.handwriting.preprocess import INPUT_HEIGHT, normalize_word
-from seedsigner.helpers.handwriting.word_model import NUM_CLASSES, WordModel
+from seedsigner.helpers.handwriting.word_model import MODEL_PATH, NUM_CLASSES, WordModel
 
 needs_native = pytest.mark.skipif(native.load() is None,
                                   reason="native library not built (make -C src/seedsigner/helpers/handwriting/native)")
@@ -91,8 +92,20 @@ def test_decoder_native_equals_numpy():
 
 
 
+def test_haller_1_weights():
+    """ The shipped weights are those of Haller-1 listed in docs/handwritten_seeds.md. """
+    expected = {
+        "haller-1-capitals.npz": "1faede0402e7e3b48e922f8a82a3d72fcbb7e7354b4909298e31616431e7206a",
+        "haller-1-lowercase.npz": "55c2aba311f7e31e4fdbe6e82d17fc820165064c23c1792e1059fa6bf4e3863f",
+    }
+    for name, sha256 in expected.items():
+        with open(os.path.join(os.path.dirname(MODEL_PATH), name), "rb") as f:
+            assert hashlib.sha256(f.read()).hexdigest() == sha256
+
+
+
 def test_read_rendered_words():
-    """ The shipped model reads printed words (a sanity check, not a benchmark). """
+    """ Haller-1 reads printed words (a sanity check, not a benchmark). """
     model, decoder = WordModel(), Decoder()
     for word in ("abandon", "zoo", "wrist", "letter"):
         scores = decoder.scores(model.log_probs(ink_map_of(word)))

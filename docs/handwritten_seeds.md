@@ -52,7 +52,7 @@ The engine is `seedsigner.helpers.handwriting`:
 |---|---|
 | `page.py` | finds the card (corners, rectification, known line positions) or the lines and columns of a list (rotation, line profiles, word numbers), and cuts out one crop per word |
 | `preprocess.py` | turns a word crop into an ink map 32 pixels high |
-| `word_model.py` | small convolutional network (about 160 000 parameters, CTC), run in 16-bit integers; two sets of weights, see [The model](#the-model) |
+| `word_model.py` | small convolutional network (about 160 000 parameters, CTC), run in 16-bit integers; two sets of weights, see [The Haller-1 model](#the-haller-1-model) |
 | `decoder.py` | log-likelihood of each of the 2 048 BIP39 words (prefix tree, beam pruning); a line number before the word is accepted |
 | `checksum.py` | combinations of plausible words, BIP39 checksum, confidence, uncertain words |
 | `native/handwriting.c` | network and decoder in portable C (no allocation, no CPython), used through `ctypes` when built; the numpy code gives the same network output and word scores within 2e-3 |
@@ -62,11 +62,12 @@ dictionary decoding only ever returns BIP39 words. The checksum then rules out
 most wrong combinations; a seed is reported as valid only when no other valid
 seed is nearly as probable and every word is read with high probability.
 
-Two networks of the same size read the words. The first one reads every
-photo. When its seed is not valid, the photo is read again by the second one,
-trained with more lowercase and cursive writing, then by a blend of both: for
-each word, the weighted sum of the log-probabilities given by the two
-networks (0.65 for the first one), which reuses the scores already computed.
+The two networks of Haller-1, of the same size, read the words. The first
+one reads every photo. When its seed is not valid, the photo is read again by
+the second one, trained with more lowercase and cursive writing, then by a
+blend of both: for each word, the weighted sum of the log-probabilities
+given by the two networks (0.65 for the first one), which reuses the scores
+already computed.
 The most likely of these readings is kept (better status, or same status with
 a more probable seed). A seed of the second network alone needs a probability
 of 0.85 instead of 0.5 to be reported as valid without uncertain words: it
@@ -167,17 +168,27 @@ list; 11 to 16 seconds for a 12-word list in lowercase or cursive (second
 readings).
 
 
-## The model
+## The Haller-1 model
 
-`src/seedsigner/resources/handwriting/word_model.npz` holds the quantized
-weights of the first network (SHA-256
-`1faede0402e7e3b48e922f8a82a3d72fcbb7e7354b4909298e31616431e7206a`) and
-`word_model_lowercase.npz` those of the second one (SHA-256
-`55c2aba311f7e31e4fdbe6e82d17fc820165064c23c1792e1059fa6bf4e3863f`). They
-are produced, from scratch and reproducibly, by the separate
-[seedsigner-ocr](https://github.com/pizza-bitcoiner/seedsigner-ocr)
-repository: synthetic words, real handwritten words, training, then
+The words are read by Haller-1, the first version of the Haller word
+recognizer. It is made of two networks of the same architecture, combined as
+described in [How it works](#how-it-works):
+
+| Weights (`src/seedsigner/resources/handwriting/`) | Role | SHA-256 |
+|---|---|---|
+| `haller-1-capitals.npz` | reads every photo; trained mostly on capitals | `1faede0402e7e3b48e922f8a82a3d72fcbb7e7354b4909298e31616431e7206a` |
+| `haller-1-lowercase.npz` | second reading; more lowercase and cursive writing | `55c2aba311f7e31e4fdbe6e82d17fc820165064c23c1792e1059fa6bf4e3863f` |
+
+They are produced, from scratch and reproducibly, by the separate
+[Haller](https://github.com/pizza-bitcoiner/haller) repository (tag
+`haller-1`): synthetic words, real handwritten words, training, then
 quantization. Photos taken by users are never used.
+
+Haller is named after Neil M. Haller of Bellcore, author of RFC 1760, "The
+S/KEY One-Time Password System" (1995). S/KEY, designed with Phil Karn and
+John Walden on an idea by Leslie Lamport, already wrote a secret as words
+from a 2,048-word dictionary, 11 bits per word, with spare bits as a
+checksum: the same layout BIP39 would use eighteen years later.
 
 Training data of these weights:
 

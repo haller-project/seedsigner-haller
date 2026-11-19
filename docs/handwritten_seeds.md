@@ -29,10 +29,19 @@ used.
 
 ## Flow
 
-1. Camera preview; a click takes a full-resolution photo (2592x1944).
-2. The photo is read on the device (5 to 15 seconds on a Pi Zero for 12
-   words), with a progress bar.
-3. Status: valid checksum, words to check, or invalid checksum.
+1. Camera preview, while the word models are loaded in the background; a click
+   takes a full-resolution photo (2592x1944), kept as JPEG data.
+2. The photo is read on the device (5 to 9 seconds on a Pi Zero for 12 words,
+   see [Timings](#timings)). The progress bar moves at a steady pace from the
+   click; the screen shows the photo while the words are searched, then the
+   area of the words with the word being read outlined, and that word.
+3. Status: a valid checksum is announced in a few words. Otherwise a full
+   screen notice says what happened (words to check, or invalid checksum),
+   that every word must be compared with the paper, what the marks on the
+   uncertain words mean, and that unmarked words can be wrong too. The text
+   is paged with the up and down keys; its "I understand" button can only be
+   selected from the last page, so that a click made by mistake does not skip
+   it.
 4. Mandatory review: every word is listed, and "Done" is only offered once each
    uncertain word has been confirmed. Uncertain words are flagged; selecting a word
    shows its handwritten image, up to three candidate words with their
@@ -55,7 +64,7 @@ The engine is `seedsigner.helpers.handwriting`:
 | `word_model.py` | small convolutional network (about 160 000 parameters, CTC), run in 16-bit integers; two sets of weights, see [The Haller-1 model](#the-haller-1-model) |
 | `decoder.py` | log-likelihood of each of the 2 048 BIP39 words (prefix tree, beam pruning); a line number before the word is accepted |
 | `checksum.py` | combinations of plausible words, BIP39 checksum, confidence, uncertain words |
-| `native/handwriting.c` | network and decoder in portable C (no allocation, no CPython), used through `ctypes` when built; the numpy code gives the same network output and word scores within 2e-3 |
+| `native/handwriting.c` | network, decoder and the flood fill of the card search in portable C (no allocation, no CPython), used through `ctypes` when built; the numpy code gives the same network output and word scores within 2e-3, and the same flood fill |
 
 There is no letter segmentation: the network reads the whole word, and the
 dictionary decoding only ever returns BIP39 words. The checksum then rules out
@@ -79,6 +88,16 @@ When the seed is invalid, or valid but improbable (probability below 0.1), a
 misread word can be read with high probability of its own while the checksum
 is passed by chance by the other words: every word is then marked uncertain.
 
+`read_seed(image, progress, on_word)` reports its progress after every step
+of the page search and of the reading. Each step is weighted by its expected
+duration on a Pi Zero (constants `*_COST` in `page.py` and `__init__.py`) and
+moves the progress by its share of the work expected to remain, an estimate
+revised once the card or list is found and when a second reading is needed:
+the bar moves steadily when the estimates are right, and never goes back nor
+stops long when they are not. `on_word(layout, k, word_reading)` is called
+after the first reading of each word; `layout.outline(k)` gives the corners of
+the word on the photo.
+
 The photo is taken through `Camera`, with two optional arguments added for
 this feature; their defaults keep the behavior of the other callers unchanged:
 
@@ -88,8 +107,20 @@ this feature; their defaults keep the behavior of the other callers unchanged:
   light (measured on a Pi Zero: 41 ms instead of 63 ms in the same scene).
 - `capture_frame(expand=True)`: rotating a landscape frame to portrait without
   expansion keeps a 2592x1944 canvas and drops a quarter of the photo (the
-  top and bottom of the page). The rotation cannot be done afterwards by the
-  handwriting code, since `capture_frame()` returns the rotated image.
+  top and bottom of the page).
+
+and two methods that split `capture_frame()`, which keeps its behavior:
+`capture_jpeg()` takes the photo and returns the camera's JPEG data, and
+`decode_frame(jpeg, expand, grayscale)` decodes and rotates it. The scan screen
+only takes the JPEG (0.6 s on a Pi Zero); the photo is decoded in the reading
+thread, under the progress bar, and luminance only: 0.5 s instead of 1.9 s
+for a color decoding, rotation and conversion to gray, and 5 MB of memory
+instead of 15 MB.
+
+The reading screen is redrawn at most every 0.7 second, with images prepared
+by the reading thread: a redraw costs about 11 ms of processor time on a Pi
+Zero (the transfer to the display takes 37 ms, during which the reading goes
+on).
 
 
 ## Native library
@@ -104,7 +135,7 @@ checks it). Only the speed differs:
 | Pi Zero, 12 words | with the library | numpy only |
 |---|---|---|
 | card | 5 s | 35 s |
-| list | 9 to 12 s | 42 s |
+| list | 7 to 10 s | 45 s |
 
 The C file has no dependency besides `libm`, allocates nothing and does not use
 the CPython API. On ARMv6 it uses the `SMLAD` instruction when the compiler
@@ -162,10 +193,27 @@ Most failures are lists cut by the frame of the photo. When the ink of a list
 reaches the edge of the photo, the user is asked to move the camera back
 (36 of 39 such photos in the measurement above); otherwise to retake the photo.
 
-On a Raspberry Pi Zero, with the C library: about 3.5 seconds to load the
-models (once), 5 seconds for a 12-word card, 9 to 12 seconds for a 12-word
-list; 11 to 16 seconds for a 12-word list in lowercase or cursive (second
-readings).
+## Timings
+
+Measured on a Raspberry Pi Zero with the C library, the application stopped,
+on photos taken by the device (12 words), from the click to the result screen:
+
+| Step | card | list, capitals | list, lowercase or cursive |
+|---|---|---|---|
+| photo taken (JPEG) | 0.6 s | 0.6 s | 0.6 s |
+| photo decoded (gray, upright) | 0.6 s | 0.6 s | 0.6 s |
+| card or list found | 0.6 s | 4.3 s | 4.3 s |
+| card rectified | 1.6 s | | |
+| words read, checksum | 2.0 s | 2.2 s | 2.5 to 4.8 s |
+| display of the reading | 0.5 s | 0.6 s | 0.6 to 0.8 s |
+| result screen | 0.2 s | 0.2 s | 0.2 s |
+| **total** | **6.1 s** | **8.1 to 8.4 s** | **9.2 to 11.4 s** |
+
+The word models (1 s, plus numpy, already imported at startup by
+SeedSigner) are loaded while the photo is framed; the camera preview runs at
+3.3 instead of 5 frames per second during that second. The progress bar never
+stays still for more than 0.9 s. The display of the reading costs 3 to 5 % of
+processor time.
 
 
 ## The Haller-1 model

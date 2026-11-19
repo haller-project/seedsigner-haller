@@ -121,7 +121,7 @@ class HandwrittenReadingScreen(BaseTopNavScreen):
     show_back_button: bool = False
     read_function: Callable = None
 
-    RENDER_INTERVAL = 0.4
+    RENDER_INTERVAL = 0.7
     TEXT_WIDTH = 100            # width left for the word read, right of the words area
     BAR_HEIGHT = 8
 

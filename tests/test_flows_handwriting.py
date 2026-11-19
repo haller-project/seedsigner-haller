@@ -1,3 +1,4 @@
+import io
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -62,8 +63,11 @@ class StubReading:
 
 
 
-def make_photo() -> Image.Image:
-    return Image.new("RGB", (1944, 2592), "white")
+def make_photo() -> bytes:
+    """ JPEG data, as returned by Camera.capture_jpeg() """
+    stream = io.BytesIO()
+    Image.new("RGB", (2592, 1944), "white").save(stream, format="jpeg")
+    return stream.getvalue()
 
 
 
@@ -140,7 +144,7 @@ class TestHandwritingFlows(FlowTest):
             assert view.review.confirmed == {2: "ability"}
 
         self.run_sequence(self.scan_steps(reading) + [
-            FlowStep(handwritten_views.HandwrittenStatusView, button_data_selection=handwritten_views.HandwrittenStatusView.REVIEW),
+            FlowStep(handwritten_views.HandwrittenStatusView, button_data_selection=handwritten_views.HandwrittenStatusView.UNDERSTAND),
             FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=2),
             FlowStep(handwritten_views.HandwrittenWordView, screen_return_value=1),  # "ability"
             FlowStep(handwritten_views.HandwrittenReviewView, before_run=check_review, screen_return_value=2),
@@ -162,7 +166,7 @@ class TestHandwritingFlows(FlowTest):
         reading = StubReading(VALID_MNEMONIC, uncertain={2: ["ability"]})
         with pytest.raises(FlowTestInvalidButtonDataSelectionException):
             self.run_sequence(self.scan_steps(reading) + [
-                FlowStep(handwritten_views.HandwrittenStatusView, button_data_selection=handwritten_views.HandwrittenStatusView.REVIEW),
+                FlowStep(handwritten_views.HandwrittenStatusView, button_data_selection=handwritten_views.HandwrittenStatusView.UNDERSTAND),
                 FlowStep(handwritten_views.HandwrittenReviewView, button_data_selection=handwritten_views.HandwrittenReviewView.DONE),
             ])
 
@@ -178,7 +182,7 @@ class TestHandwritingFlows(FlowTest):
             assert view.review.confirmed == {11: "about"}
 
         self.run_sequence(self.scan_steps(reading) + [
-            FlowStep(handwritten_views.HandwrittenStatusView, button_data_selection=handwritten_views.HandwrittenStatusView.REVIEW),
+            FlowStep(handwritten_views.HandwrittenStatusView, button_data_selection=handwritten_views.HandwrittenStatusView.UNDERSTAND),
             FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=11),
             FlowStep(handwritten_views.HandwrittenWordView, button_data_selection=handwritten_views.HandwrittenWordView.TYPE_WORD),
             FlowStep(handwritten_views.HandwrittenWordEntryView, screen_return_value=RET_CODE__BACK_BUTTON),
@@ -196,7 +200,7 @@ class TestHandwritingFlows(FlowTest):
         """
         reading = StubReading(INVALID_MNEMONIC, is_valid=False)
         self.run_sequence(self.scan_steps(reading) + [
-            FlowStep(handwritten_views.HandwrittenStatusView, button_data_selection=handwritten_views.HandwrittenStatusView.REVIEW),
+            FlowStep(handwritten_views.HandwrittenStatusView, button_data_selection=handwritten_views.HandwrittenStatusView.UNDERSTAND),
             FlowStep(handwritten_views.HandwrittenReviewView, button_data_selection=handwritten_views.HandwrittenReviewView.DONE),
             FlowStep(handwritten_views.HandwrittenInvalidView, button_data_selection=handwritten_views.HandwrittenInvalidView.EDIT),
             FlowStep(handwritten_views.HandwrittenReviewView, button_data_selection=handwritten_views.HandwrittenReviewView.DONE),
@@ -261,21 +265,23 @@ class TestHandwritingFlows(FlowTest):
 
     def test_read_function_calls_engine(self):
         """
-        The reading screen's function passes the photo and the progress callback to
-        `read_seed`.
+        The reading screen's function decodes the photo upright and in grayscale, shows it,
+        and passes it to `read_seed` with the screen's progress and word callbacks.
         """
-        photo = make_photo()
         reading = StubReading(VALID_MNEMONIC)
         engine = MagicMock()
         engine.read_seed.return_value = reading
-        progress = MagicMock()
+        screen = MagicMock()
 
-        view = handwritten_views.HandwrittenReadView(photo=photo)
+        view = handwritten_views.HandwrittenReadView(photo=make_photo())
         with patch.dict(sys.modules, {"seedsigner.helpers.handwriting": engine}):
-            with patch.object(View, "run_screen", side_effect=lambda Screen_cls, read_function: read_function(progress)):
+            with patch.object(View, "run_screen", side_effect=lambda Screen_cls, read_function: read_function(screen)):
                 destination = view.run()
 
-        engine.read_seed.assert_called_once_with(photo, progress=progress)
+        photo = engine.read_seed.call_args.args[0]
+        assert photo.mode == "L" and photo.size == (1944, 2592)
+        screen.show_photo.assert_called_once_with(photo)
+        engine.read_seed.assert_called_once_with(photo, progress=screen.report_progress, on_word=screen.show_word)
         assert destination.View_cls == handwritten_views.HandwrittenStatusView
         assert destination.view_args["review"].reading is reading
         assert destination.skip_current_view
@@ -326,7 +332,7 @@ class TestHandwrittenScanScreen(HandwrittenScreenTestBase):
         photo = make_photo()
         mock_camera = MagicMock()
         mock_camera.read_single_frame_preview.return_value = Image.new("RGB", (240, 320))
-        mock_camera.capture_frame.return_value = photo
+        mock_camera.capture_jpeg.return_value = photo
 
         # Opening click still held, then released, then a new click
         screen = self.build_screen(mock_camera, left_script=[], anyclick_script=[True, True, False, True])
@@ -339,7 +345,7 @@ class TestHandwrittenScanScreen(HandwrittenScreenTestBase):
             resolution=HandwrittenScanScreen.PHOTO_RESOLUTION,
             framerate=HandwrittenScanScreen.PHOTO_FRAMERATE,
         )
-        mock_camera.capture_frame.assert_called_once_with(expand=True)
+        mock_camera.capture_jpeg.assert_called_once_with()
         mock_camera.stop_single_frame_mode.assert_called_once()
 
 
@@ -349,35 +355,111 @@ class TestHandwrittenScanScreen(HandwrittenScreenTestBase):
 
         assert screen._run() == RET_CODE__BACK_BUTTON
         mock_camera.stop_single_frame_mode.assert_called_once()
-        mock_camera.capture_frame.assert_not_called()
+        mock_camera.capture_jpeg.assert_not_called()
 
 
 
 class TestHandwrittenReadingScreen(HandwrittenScreenTestBase):
 
-    def run_screen(self, read_function):
+    def run_screen(self, read_function, style: str = "sheet"):
         from seedsigner.gui.screens.handwritten_screens import HandwrittenReadingScreen
 
         with self.renderer_patch:
-            screen = HandwrittenReadingScreen(read_function=read_function)
+            screen = HandwrittenReadingScreen(read_function=read_function, style=style)
             screen.reading_thread.start()
             return screen, screen._run()
 
 
     def test_returns_reading_result(self):
-        def read_function(progress):
-            progress(0.5)
+        fractions = []
+
+        def read_function(screen):
+            screen.report_progress(0.5)
+            fractions.append(screen.fraction)
             return "result"
 
         screen, result = self.run_screen(read_function)
 
         assert result == "result"
-        assert screen.fraction == 0.5
+        assert fractions == [0.5]
+        # The last image before the next screen shows the full bar
+        assert screen.fraction == 1.0
+
+
+    @pytest.mark.parametrize("style", ["sheet", "word", "list"])
+    def test_photo_and_words_shown(self, style: str):
+        """
+        The photo, then each word read, are prepared by the reading thread and drawn
+        within the screen.
+        """
+        layout = MagicMock(count=12)
+        layout.outline.side_effect = lambda k: [(100, 200 + 100 * k), (900, 200 + 100 * k), (900, 280 + 100 * k), (100, 280 + 100 * k)]
+
+        def read_function(screen):
+            screen.show_photo(Image.new("L", (1944, 2592), 200))
+            screen._render_reading()
+            for k in range(12):
+                screen.show_word(layout, k, MagicMock(image=Image.new("L", (800, 80), 230), candidates=[("abandon", 0.0)]))
+                screen._render_reading()
+            return screen
+
+        screen, _ = self.run_screen(read_function, style)
+
+        assert screen.words == ["abandon"] * 12 and screen.word == (11, 12, "abandon")
+        if screen.image is not None:
+            left, top, right, bottom = screen.area
+            assert screen.image.width <= right - left and screen.image.height <= bottom - top
 
 
     def test_reraises_reading_error(self):
-        def read_function(progress):
+        def read_function(screen):
             raise ValueError("No seed words found")
 
         with pytest.raises(ValueError, match="No seed words found"):
             self.run_screen(read_function)
+
+
+
+class TestHandwrittenNoticeScreen(HandwrittenScreenTestBase):
+
+    def build_screen(self, inputs: list):
+        from seedsigner.gui.screens.handwritten_screens import HandwrittenNoticeScreen
+        self.mock_renderer.canvas = Image.new("RGB", (240, 240))
+
+        with self.renderer_patch:
+            screen = HandwrittenNoticeScreen(
+                title="12 words read",
+                status_headline="Words to check: 2",
+                paragraphs=[(None, "Some words could not be read with certainty. " * 4)] * 3,
+            )
+        screen.hw_inputs = MagicMock()
+        screen.hw_inputs.wait_for.side_effect = inputs
+        return screen
+
+
+    def run(self, screen):
+        # The hardware buttons module is mocked: give it a real list of click keys
+        from seedsigner.hardware.buttons import HardwareButtonsConstants as Keys
+        with patch.object(Keys, "KEYS__ANYCLICK", [Keys.KEY_PRESS]):
+            return screen._run()
+
+
+    def test_click_ignored_until_end_of_text(self):
+        """
+        Clicks do nothing until the last page of text is shown and the button selected.
+        """
+        from seedsigner.hardware.buttons import HardwareButtonsConstants as Keys
+        pages = len(self.build_screen([]).pages)
+        assert pages > 1
+
+        screen = self.build_screen([Keys.KEY_PRESS] + [Keys.KEY_DOWN] * (pages - 1) + [Keys.KEY_PRESS, Keys.KEY_DOWN, Keys.KEY_PRESS])
+        assert self.run(screen) == 0
+        assert screen.page == pages - 1
+        assert screen.hw_inputs.wait_for.call_count == pages + 3
+
+
+    def test_up_deselects_button(self):
+        from seedsigner.hardware.buttons import HardwareButtonsConstants as Keys
+        screen = self.build_screen([Keys.KEY_DOWN] * 20 + [Keys.KEY_UP, Keys.KEY_PRESS, Keys.KEY_DOWN, Keys.KEY_PRESS])
+        assert self.run(screen) == 0
+        assert screen.hw_inputs.wait_for.call_count == 24

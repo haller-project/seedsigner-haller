@@ -1,17 +1,17 @@
 import time
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from gettext import gettext as _
 from typing import Callable
-from PIL import Image
+from PIL import Image, ImageDraw
 
-from seedsigner.gui.components import Fonts, GUIConstants
+from seedsigner.gui.components import Button, Fonts, GUIConstants
 from seedsigner.hardware.buttons import HardwareButtonsConstants
 from seedsigner.hardware.camera import Camera
 from seedsigner.helpers.l10n import mark_for_translation as _mft
 from seedsigner.models.threads import BaseThread
 
-from .screen import RET_CODE__BACK_BUTTON, BaseScreen, BaseTopNavScreen, ButtonListScreen
+from .screen import RET_CODE__BACK_BUTTON, BaseScreen, BaseTopNavScreen, ButtonListScreen, ButtonOption
 
 
 
@@ -19,8 +19,8 @@ from .screen import RET_CODE__BACK_BUTTON, BaseScreen, BaseTopNavScreen, ButtonL
 class HandwrittenScanScreen(BaseScreen):
     """
     Live camera preview to frame the handwritten words. A click takes a still photo at
-    the full resolution of the camera and returns it as a PIL Image; KEY_LEFT returns
-    RET_CODE__BACK_BUTTON.
+    the full resolution of the camera and returns it as JPEG data (decoded by
+    `Camera.decode_frame()`); KEY_LEFT returns RET_CODE__BACK_BUTTON.
 
     The preview comes from the camera that takes the photo and shows its whole field of
     view, so the photo is the framed image, taken without delay after the click.
@@ -59,10 +59,9 @@ class HandwrittenScanScreen(BaseScreen):
         )
 
 
-    def _capture_photo(self) -> Image.Image:
+    def _capture_photo(self) -> bytes:
         try:
-            # expand: the photo keeps the whole field of view once rotated to portrait
-            return self.camera.capture_frame(expand=True)
+            return self.camera.capture_jpeg()
         finally:
             self.camera.stop_single_frame_mode()
 
@@ -107,89 +106,207 @@ class HandwrittenScanScreen(BaseScreen):
 @dataclass
 class HandwrittenReadingScreen(BaseTopNavScreen):
     """
-    Runs `read_function(progress)` in a background thread and displays the progress it
-    reports through `progress(fraction)`.
+    Runs `read_function(screen)` in a background thread, which reports to the screen
+    the photo (`show_photo`), the words read (`show_word`) and the progress
+    (`report_progress`). The images displayed are prepared by the reading thread; the
+    screen is redrawn at most every RENDER_INTERVAL seconds (each redraw costs the
+    reading about 15ms of processor time on a Pi Zero).
+
+    `style`: what is shown above the progress bar once the words are found:
+    * "sheet": the photo, with the word being read outlined, and that word;
+    * "word": the photographed word being read, and that word;
+    * "list": the words read so far.
 
     Returns the value returned by `read_function`; re-raises the exception it raised.
     """
     title: str = _mft("Reading words")
     show_back_button: bool = False
     read_function: Callable = None
+    style: str = "sheet"
+
+    RENDER_INTERVAL = 0.4
+    TEXT_WIDTH = 100            # width left for the word read, right of the sheet
+    BAR_HEIGHT = 8
 
 
     def __post_init__(self):
         super().__post_init__()
         self.fraction = 0.0
-        self.font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.get_body_font_size())
+        self.photo = None       # the photo, while the words are being read
+        self.sheet = None       # (thumbnail of the words area, its origin and scale on the photo)
+        self.image = None       # image shown above the bar, prepared by the reading thread
+        self.word = None        # (index, count, text) of the last word read
+        self.words = []
+        self.version = 0        # incremented by the reading thread on each change
 
-        self.reading_thread = HandwrittenReadingScreen.ReadingThread(
-            read_function=self.read_function,
-            progress=self.report_progress,
-        )
+        self.bar_top = self.canvas_height - GUIConstants.EDGE_PADDING - self.BAR_HEIGHT
+        self.area = (GUIConstants.EDGE_PADDING, self.top_nav.height, self.canvas_width - GUIConstants.EDGE_PADDING,
+                     self.bar_top - GUIConstants.COMPONENT_PADDING)
+        self.label_font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.LABEL_FONT_SIZE)
+        self.word_font = Fonts.get_font(GUIConstants.FIXED_WIDTH_EMPHASIS_FONT_NAME, GUIConstants.get_top_nav_title_font_size())
+
+        self.reading_thread = HandwrittenReadingScreen.ReadingThread(read_function=self.read_function, screen=self)
         self.threads.append(self.reading_thread)
 
 
     def report_progress(self, fraction: float):
         """ Called from the reading thread; the screen redraws on its next loop """
         self.fraction = min(max(fraction, 0.0), 1.0)
+        self.version += 1
+
+
+    def show_photo(self, photo: Image.Image):
+        """ Called from the reading thread with the photo, shown while the words are searched """
+        left, top, right, bottom = self.area
+        self.photo = photo
+        self.image = self.thumbnail(photo, right - left, bottom - top)
+        self.version += 1
+
+
+    @staticmethod
+    def thumbnail(image: Image.Image, width: int, height: int) -> Image.Image:
+        """ `image` reduced to fit in width x height, in RGB """
+        factor = max(1, -(-image.height // height), -(-image.width // width))
+        return image.reduce(factor).convert("RGB")
+
+
+    def show_word(self, layout, k: int, reading):
+        """ Called from the reading thread after the first reading of each word """
+        text = reading.candidates[0][0]
+        if self.style == "sheet" and self.photo:
+            if k == 0:
+                # Thumbnail of the area of the words, next to the text of the word read
+                corners = [p for i in range(layout.count) for p in layout.outline(i)]
+                x0, y0 = min(x for x, _ in corners), min(y for _, y in corners)
+                x1, y1 = max(x for x, _ in corners), max(y for _, y in corners)
+                margin = 0.05 * max(x1 - x0, y1 - y0)
+                box = tuple(int(v) for v in (max(0, x0 - margin), max(0, y0 - margin),
+                                             min(self.photo.width, x1 + margin), min(self.photo.height, y1 + margin)))
+                left, top, right, bottom = self.area
+                thumbnail = self.thumbnail(self.photo.crop(box), right - left - self.TEXT_WIDTH, bottom - top)
+                self.sheet = (thumbnail, box[:2], thumbnail.width / (box[2] - box[0]))
+            thumbnail, (x0, y0), scale = self.sheet
+            image = thumbnail.copy()
+            ImageDraw.Draw(image).polygon([((x - x0) * scale, (y - y0) * scale) for x, y in layout.outline(k)],
+                                          outline=GUIConstants.ACCENT_COLOR, width=2)
+            self.image = image
+        elif self.style == "word":
+            left, top, right, bottom = self.area
+            word = reading.image
+            factor = max(1, int(min(word.width / (right - left), word.height / ((bottom - top) / 2))))
+            word = word.reduce(factor)
+            scale = min((right - left) / word.width, (bottom - top) / 2 / word.height)
+            self.image = word.resize((max(1, int(word.width * scale)), max(1, int(word.height * scale)))).convert("RGB")
+        else:
+            self.image = None
+        if k == 0:
+            self.words = [None] * layout.count
+        self.words[k] = text
+        self.word = (k, layout.count, text)
+        self.version += 1
 
 
     def _render(self):
         super()._render()
-        self._render_progress()
+        self._render_reading()
 
 
-    def _render_progress(self):
+    def _render_reading(self):
         draw = self.renderer.draw
         draw.rectangle((0, self.top_nav.height, self.canvas_width, self.canvas_height), fill=GUIConstants.BACKGROUND_COLOR)
+        left, top, right, bottom = self.area
 
-        center_x = int(self.canvas_width/2)
-        bar_y = int((self.top_nav.height + self.canvas_height)/2)
+        if self.word is not None and self.style == "list":
+            self._render_list()
+        elif self.word is not None and self.style == "word":
+            image = self.image
+            y = top + int((bottom - top - image.height - 2 * GUIConstants.COMPONENT_PADDING
+                           - GUIConstants.LABEL_FONT_SIZE - self.word_font.size) / 2)
+            self.renderer.canvas.paste(image, (int((left + right - image.width) / 2), y))
+            self._render_word(int((left + right) / 2), y + image.height + GUIConstants.COMPONENT_PADDING, "mt")
+        elif self.image is not None:
+            image = self.image
+            if self.word is None:
+                x = int((left + right - image.width) / 2)
+            else:
+                x = left
+                self._render_word(int((x + image.width + right) / 2), int((top + bottom) / 2), "mm")
+            self.renderer.canvas.paste(image, (x, top + int((bottom - top - image.height) / 2)))
+
         # Progress bar
-        bar_left = GUIConstants.EDGE_PADDING
-        bar_right = self.canvas_width - GUIConstants.EDGE_PADDING
-        draw.rectangle((bar_left, bar_y, bar_right, bar_y + GUIConstants.COMPONENT_PADDING), outline=GUIConstants.INACTIVE_COLOR)
-        draw.rectangle(
-            (bar_left, bar_y, bar_left + int((bar_right - bar_left) * self.fraction), bar_y + GUIConstants.COMPONENT_PADDING),
-            fill=GUIConstants.ACCENT_COLOR
-        )
+        draw.rectangle((left, self.bar_top, right, self.bar_top + self.BAR_HEIGHT), outline=GUIConstants.INACTIVE_COLOR)
+        draw.rectangle((left, self.bar_top, left + int((right - left) * self.fraction), self.bar_top + self.BAR_HEIGHT),
+                       fill=GUIConstants.ACCENT_COLOR)
 
-        draw.text(
-            xy=(center_x, bar_y + 2*GUIConstants.COMPONENT_PADDING),
-            text=f"{self.fraction:.0%}",
-            fill=GUIConstants.LABEL_FONT_COLOR,
-            font=self.font,
-            anchor="mt",
-        )
+
+    def _render_word(self, x: int, y: int, anchor: str):
+        """ Number and text of the last word read, centered on x """
+        k, count, text = self.word
+        draw = self.renderer.draw
+        label_height = GUIConstants.LABEL_FONT_SIZE + GUIConstants.COMPONENT_PADDING
+        if anchor == "mm":
+            y -= int(label_height / 2)
+        draw.text((x, y - (label_height if anchor == "mm" else 0)), f"{k + 1}/{count}", fill=GUIConstants.LABEL_FONT_COLOR,
+                  font=self.label_font, anchor="mt" if anchor == "mt" else "mm")
+        draw.text((x, y + (label_height if anchor == "mt" else 0)), text, fill=GUIConstants.BODY_FONT_COLOR,
+                  font=self.word_font, anchor=anchor)
+
+
+    def _render_list(self):
+        """ The words read so far, numbered, in two columns; the last one highlighted """
+        left, top, right, bottom = self.area
+        rows = -(-len(self.words) // 2)
+        row_height = (bottom - top) / rows
+        size = min(22, int(row_height * 0.9))
+        while True:
+            font = Fonts.get_font(GUIConstants.FIXED_WIDTH_EMPHASIS_FONT_NAME, size)
+            # "24 abandon " fits in a column: BIP39 words have at most 8 letters
+            if font.getlength("00 abcdefgh ") <= (right - left) / 2 or size <= 10:
+                break
+            size -= 1
+        draw = self.renderer.draw
+        for k, text in enumerate(self.words):
+            x = left + (k // rows) * int((right - left) / 2)
+            y = top + int((k % rows + 0.5) * row_height)
+            color = GUIConstants.ACCENT_COLOR if k == self.word[0] else GUIConstants.BODY_FONT_COLOR
+            draw.text((x, y), f"{k + 1:>2} ", fill=GUIConstants.LABEL_FONT_COLOR, font=font, anchor="lm")
+            if text:
+                draw.text((x + font.getlength("00 "), y), text, fill=color, font=font, anchor="lm")
 
 
     def _run(self):
-        displayed = None
+        displayed, last_render = None, 0.0
         while self.reading_thread.is_alive():
-            if displayed != self.fraction:
-                displayed = self.fraction
+            if displayed != self.version and time.time() - last_render >= self.RENDER_INTERVAL:
+                displayed, last_render = self.version, time.time()
                 with self.renderer.lock:
-                    self._render_progress()
+                    self._render_reading()
                     self.renderer.show_image()
-            time.sleep(0.1)
+            time.sleep(0.05)
 
         if self.reading_thread.error is not None:
             raise self.reading_thread.error
+
+        # The full bar, on the last image before the next screen
+        self.fraction = 1.0
+        with self.renderer.lock:
+            self._render_reading()
+            self.renderer.show_image()
         return self.reading_thread.result
 
 
     class ReadingThread(BaseThread):
-        def __init__(self, read_function: Callable, progress: Callable):
+        def __init__(self, read_function: Callable, screen):
             super().__init__()
             self.read_function = read_function
-            self.progress = progress
+            self.screen = screen
             self.result = None
             self.error = None
 
 
         def run(self):
             try:
-                self.result = self.read_function(self.progress)
+                self.result = self.read_function(self.screen)
             except Exception as e:
                 # Re-raised by the screen in the main thread
                 self.error = e
@@ -222,3 +339,159 @@ class HandwrittenWordScreen(ButtonListScreen):
             image,
             (int((self.canvas_width - image.width)/2), top + int((self.buttons[0].screen_y - top - image.height)/2))
         ))
+
+
+
+@dataclass
+class HandwrittenNoticeScreen(BaseTopNavScreen):
+    """
+    Full screen notice to read before going on: a colored headline, then `paragraphs`,
+    (icon name or None, text) pairs, the icon being drawn before its paragraph. KEY_DOWN
+    and KEY_UP turn the pages of the text. The button below it can only be selected
+    from the last page, so that a click made by mistake does not skip the notice.
+
+    Returns 0 when the button is clicked.
+    """
+    show_back_button: bool = False
+    status_headline: str = None
+    status_color: str = GUIConstants.WARNING_COLOR
+    paragraphs: list = None
+    icon_color: str = GUIConstants.WARNING_COLOR
+    button_data: list = field(default_factory=lambda: [ButtonOption("I understand")])
+
+    ARROW_HALF_WIDTH = 10
+
+
+    def __post_init__(self):
+        super().__post_init__()
+        button_y = self.canvas_height - GUIConstants.EDGE_PADDING - GUIConstants.BUTTON_HEIGHT
+        self.button = Button(
+            text=_(self.button_data[0].button_label),
+            screen_x=GUIConstants.EDGE_PADDING,
+            screen_y=button_y,
+            width=self.canvas_width - 2 * GUIConstants.EDGE_PADDING,
+            height=GUIConstants.BUTTON_HEIGHT,
+            font_name=GUIConstants.get_button_font_name(),
+            font_size=GUIConstants.get_button_font_size(),
+            is_scrollable_text=False,
+        )
+        self.components.append(self.button)
+
+        self.text_top = self.top_nav.height
+        # Room left below the text for the down arrow
+        self.text_height = button_y - 2 * GUIConstants.COMPONENT_PADDING - self.text_top
+        self.text_image, self.lines = self._render_text_image()
+
+        # First line of each page: a page shows the whole lines that fit, and starts
+        # with a paragraph unless that paragraph is longer than a page
+        self.pages = [0]
+        while True:
+            top = self.lines[self.pages[-1]][0]
+            following = [k for k, (_, bottom, _) in enumerate(self.lines) if bottom > top + self.text_height]
+            if not following:
+                break
+            k = following[0]
+            start = min(j for j, line in enumerate(self.lines) if line[2] == self.lines[k][2])
+            self.pages.append(start if start > self.pages[-1] else k)
+        self.page = 0
+
+
+    def _render_text_image(self) -> tuple[Image.Image, list[tuple[int, int, int]]]:
+        """
+        The headline and paragraphs, rendered once into an image as wide as the screen,
+        and the (top, bottom, paragraph) of each line of text in it.
+        """
+        padding = 2 * GUIConstants.EDGE_PADDING
+        body_font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.get_body_font_size())
+        headline_font = Fonts.get_font(GUIConstants.get_button_font_name(), GUIConstants.get_body_font_size())
+        icon_font = Fonts.get_font(GUIConstants.ICON_FONT_NAME__SEEDSIGNER, GUIConstants.ICON_FONT_SIZE, file_extension="otf")
+        ascent, descent = body_font.getmetrics()
+        line_height = ascent + descent
+
+        def wrap(text: str, font, width: int) -> list[str]:
+            lines = []
+            for word in text.split():
+                if lines and font.getlength(lines[-1] + " " + word) <= width:
+                    lines[-1] += " " + word
+                else:
+                    lines.append(word)
+            return lines
+
+        # (x, y, text, font, color, anchor) of everything to draw
+        items = []
+        lines = []
+        y = int(GUIConstants.COMPONENT_PADDING / 2)
+        paragraphs = ([(None, self.status_headline)] if self.status_headline else []) + list(self.paragraphs or [])
+        for k, (icon_name, text) in enumerate(paragraphs):
+            is_headline = k == 0 and self.status_headline
+            x = padding
+            if icon_name:
+                items.append((x, y, icon_name, icon_font, self.icon_color, "la"))
+                x += GUIConstants.ICON_FONT_SIZE + GUIConstants.COMPONENT_PADDING
+            font = headline_font if is_headline else body_font
+            for line in wrap(text, font, self.canvas_width - padding - x):
+                if is_headline:
+                    items.append((int(self.canvas_width / 2), y, line, font, self.status_color, "ma"))
+                else:
+                    items.append((x, y, line, font, GUIConstants.BODY_FONT_COLOR, "la"))
+                # The headline is kept on the page of the first paragraph
+                lines.append((y, y + line_height, max(k, 1) if self.status_headline else k))
+                y += line_height
+            y += GUIConstants.COMPONENT_PADDING
+
+        image = Image.new("RGB", (self.canvas_width, y), GUIConstants.BACKGROUND_COLOR)
+        draw = ImageDraw.Draw(image)
+        for x, y, text, font, color, anchor in items:
+            draw.text((x, y), text, font=font, fill=color, anchor=anchor)
+        return image, lines
+
+
+    def _render(self):
+        super()._render()
+        self._render_text()
+
+
+    def _render_text(self):
+        """ The current page of text, with arrows when there are other pages or the button below """
+        first = self.pages[self.page]
+        last = self.pages[self.page + 1] if self.page + 1 < len(self.pages) else len(self.lines)
+        top, bottom = self.lines[first][0], self.lines[last - 1][1]
+        self.image_draw.rectangle((0, self.text_top, self.canvas_width, self.button.screen_y - 1), fill=GUIConstants.BACKGROUND_COLOR)
+        self.canvas.paste(self.text_image.crop((0, top, self.canvas_width, bottom)), (0, self.text_top))
+
+        x, w = int(self.canvas_width / 2), self.ARROW_HALF_WIDTH
+        if self.page > 0:
+            y = self.top_nav.height - 10
+            self.image_draw.line((x - w, y + 6, x, y, x + w, y + 6), fill=GUIConstants.BUTTON_FONT_COLOR)
+        if not self.button.is_selected:
+            y = self.button.screen_y - 2
+            self.image_draw.line((x - w, y - 6, x, y, x + w, y - 6), fill=GUIConstants.BUTTON_FONT_COLOR)
+
+
+    def _run(self):
+        while True:
+            user_input = self.hw_inputs.wait_for(
+                [HardwareButtonsConstants.KEY_UP, HardwareButtonsConstants.KEY_DOWN] + HardwareButtonsConstants.KEYS__ANYCLICK
+            )
+
+            with self.renderer.lock:
+                if user_input == HardwareButtonsConstants.KEY_DOWN:
+                    if self.page + 1 < len(self.pages):
+                        self.page += 1
+                    else:
+                        self.button.is_selected = True
+
+                elif user_input == HardwareButtonsConstants.KEY_UP:
+                    if self.button.is_selected:
+                        self.button.is_selected = False
+                    else:
+                        self.page = max(self.page - 1, 0)
+
+                elif user_input in HardwareButtonsConstants.KEYS__ANYCLICK and self.button.is_selected:
+                    return 0
+
+                else:
+                    continue
+
+                self._render()
+                self.renderer.show_image()

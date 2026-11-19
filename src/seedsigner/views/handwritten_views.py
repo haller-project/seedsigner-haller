@@ -6,16 +6,20 @@ Flow: photo (HandwrittenScanView), reading (HandwrittenReadView), result
 (HandwrittenStatusView), review of every word, with each uncertain word confirmed (HandwrittenReviewView,
 HandwrittenWordView, HandwrittenWordEntryView), then the standard SeedFinalizeView.
 
-The photo is only kept in memory, and only until the reading is done.
+The photo is only kept in memory (as JPEG data), and only until the reading is done.
 """
+import threading
+
 from gettext import gettext as _
 
 from seedsigner.gui.components import FontAwesomeIconConstants, GUIConstants, SeedSignerIconConstants
 from seedsigner.gui.screens import (RET_CODE__BACK_BUTTON, ButtonListScreen, DireWarningScreen,
     LargeIconStatusScreen, WarningScreen)
-from seedsigner.gui.screens.handwritten_screens import HandwrittenReadingScreen, HandwrittenScanScreen, HandwrittenWordScreen
+from seedsigner.gui.screens.handwritten_screens import (HandwrittenNoticeScreen, HandwrittenReadingScreen,
+    HandwrittenScanScreen, HandwrittenWordScreen)
 from seedsigner.gui.screens.screen import ButtonOption, ButtonOptionWithoutTranslation
 from seedsigner.gui.screens.seed_screens import SeedMnemonicEntryScreen
+from seedsigner.hardware.camera import Camera
 from seedsigner.models.seed import InvalidSeedException, Seed
 from seedsigner.views.view import BackStackView, Destination, MainMenuView, View
 
@@ -47,8 +51,25 @@ class HandwrittenReview:
 
 
 
+def load_engine():
+    """
+    Loads the word models (about a second on a Pi Zero). Errors are left to the
+    reading, which loads them again.
+    """
+    try:
+        from seedsigner.helpers.handwriting import load_engine
+        load_engine()
+    except Exception:
+        pass
+
+
+
 class HandwrittenScanView(View):
     def run(self):
+        # The word models are loaded while the photo is framed: the preview is limited by
+        # the camera, not by the processor
+        threading.Thread(target=load_engine, daemon=True).start()
+
         photo = self.run_screen(HandwrittenScanScreen)
 
         if photo == RET_CODE__BACK_BUTTON:
@@ -62,19 +83,23 @@ class HandwrittenReadView(View):
     """
     Reads the words in a background thread while the screen displays the progress.
     Removed from the back_stack once done, which releases the photo.
+
+    `photo`: JPEG data from the camera, decoded in the reading thread.
     """
-    def __init__(self, photo):
+    def __init__(self, photo: bytes):
         super().__init__()
         self.photo = photo
 
 
     def run(self):
-        # The model weights are loaded by read_seed, in the reading thread, while
-        # the reading screen is displayed.
+        # The word models are loaded by HandwrittenScanView, or else by read_seed in the
+        # reading thread, while the reading screen is displayed.
         from seedsigner.helpers.handwriting import WordsNotFound, read_seed
 
-        def read_function(progress):
-            return read_seed(self.photo, progress=progress)
+        def read_function(screen):
+            photo = Camera.get_instance().decode_frame(self.photo, expand=True, grayscale=True)
+            screen.show_photo(photo)
+            return read_seed(photo, progress=screen.report_progress, on_word=screen.show_word)
 
         try:
             reading = self.run_screen(HandwrittenReadingScreen, read_function=read_function)
@@ -129,7 +154,12 @@ class HandwrittenReadFailedView(View):
 
 
 class HandwrittenStatusView(View):
+    """
+    A valid reading is announced in a few words; otherwise a full screen notice explains
+    what to do, and must be scrolled through before going on to the review.
+    """
     REVIEW = ButtonOption("Review words")
+    UNDERSTAND = ButtonOption("I understand")
 
     def __init__(self, review: HandwrittenReview):
         super().__init__()
@@ -138,32 +168,47 @@ class HandwrittenStatusView(View):
 
     def run(self):
         analysis = self.review.analyze()
+        # TRANSLATOR_NOTE: Inserts the number of words read (e.g. "12 words read")
+        title = _("{} words read").format(len(analysis.mnemonic))
 
         if analysis.status == "valid":
-            Screen_cls = LargeIconStatusScreen
-            status_headline = _("Valid checksum")
-            text = _("Compare every word with your paper before using this seed.")
-
-        elif analysis.status == "uncertain":
-            Screen_cls = WarningScreen
-            # TRANSLATOR_NOTE: Inserts the number of uncertain words (e.g. "Words to check: 2")
-            status_headline = _("Words to check: {}").format(len(analysis.uncertain))
-            text = _("Uncertain words are marked. Compare every word with your paper.")
+            self.run_screen(
+                LargeIconStatusScreen,
+                title=title,
+                status_headline=_("Valid checksum"),
+                text=_("Compare every word with your paper before using this seed."),
+                show_back_button=False,
+                button_data=[self.REVIEW],
+            )
 
         else:
-            Screen_cls = DireWarningScreen
-            status_headline = _("Invalid checksum")
-            text = _("Some words were misread. Fix them by comparing with your paper.")
+            if analysis.status == "uncertain":
+                # TRANSLATOR_NOTE: Inserts the number of uncertain words (e.g. "Words to check: 2")
+                status_headline = _("Words to check: {}").format(len(analysis.uncertain))
+                status_color = GUIConstants.WARNING_COLOR
+                what = _("Some words could not be read with certainty. Compare every word with your paper.")
+            else:
+                status_headline = _("Invalid checksum")
+                status_color = GUIConstants.DIRE_WARNING_COLOR
+                what = _("Some words were misread: this is not a valid seed. Compare every word with your paper.")
 
-        self.run_screen(
-            Screen_cls,
-            # TRANSLATOR_NOTE: Inserts the number of words read (e.g. "12 words read")
-            title=_("{} words read").format(len(analysis.mnemonic)),
-            status_headline=status_headline,
-            text=text,
-            show_back_button=False,
-            button_data=[self.REVIEW],
-        )
+            if len(analysis.uncertain) == len(analysis.mnemonic):
+                marks = _("Every word is marked like this: open each one, then confirm or correct it.")
+            else:
+                marks = _("The least sure words are marked like this: open each one, then confirm or correct it.")
+
+            self.run_screen(
+                HandwrittenNoticeScreen,
+                title=title,
+                status_headline=status_headline,
+                status_color=status_color,
+                paragraphs=[
+                    (None, what),
+                    (SeedSignerIconConstants.WARNING, marks),
+                    (None, _("Unmarked words can be wrong too. Never use this seed without checking it.")),
+                ],
+                button_data=[self.UNDERSTAND],
+            )
 
         return Destination(HandwrittenReviewView, view_args={"review": self.review}, skip_current_view=True)
 

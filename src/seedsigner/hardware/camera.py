@@ -76,6 +76,13 @@ class Camera(Singleton):
 
 
     def capture_frame(self, expand=False):
+        return self.decode_frame(self.capture_jpeg(), expand=expand)
+
+
+    def capture_jpeg(self) -> bytes:
+        """
+        Takes a still photo and returns it as JPEG data, to be decoded by `decode_frame()`.
+        """
         if self._picamera is None:
             raise Exception("Must call start_single_frame_mode first.")
 
@@ -88,10 +95,18 @@ class Camera(Singleton):
 
         stream = io.BytesIO()
         self._picamera.capture(stream, format='jpeg')
+        return stream.getvalue()
 
-        # "Rewind" the stream to the beginning so we can read its content
-        stream.seek(0)
-        return Image.open(stream).rotate(90 + self._camera_rotation, expand=expand)
+
+    def decode_frame(self, jpeg: bytes, expand=False, grayscale=False) -> Image.Image:
+        """
+        Upright image of a photo from `capture_jpeg()`. `grayscale` only decodes the
+        luminance, about three times faster.
+        """
+        image = Image.open(io.BytesIO(jpeg))
+        if grayscale:
+            image.draft("L", image.size)
+        return image.rotate(90 + self._camera_rotation, expand=expand)
 
 
     def read_single_frame_preview(self, resolution=(320, 240)):

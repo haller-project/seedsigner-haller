@@ -286,6 +286,10 @@ on photos taken by the device (12 words), from the click to the result screen:
 | result screen | 0.2 s | 0.2 s | 0.2 s |
 | **total** | **6.1 s** | **8.1 to 8.4 s** | **9.2 to 11.4 s** |
 
+The calibrated analysis and the widening of the list crops add, on the same
+photos: nothing on the card, 0.4 s on the lists in capitals, 0.5 to 1.9 s on
+the lowercase and cursive lists (more readings of each word to combine).
+
 The word models (1 s; numpy is already imported at startup by
 SeedSigner) are loaded while the photo is framed; the camera preview runs at
 3.3 instead of 5 frames per second during that second. The progress bar never

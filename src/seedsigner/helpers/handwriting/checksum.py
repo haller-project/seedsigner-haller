@@ -14,14 +14,19 @@
 """
 import hashlib
 import math
+from operator import itemgetter
 
 from embit import bip39
 
 # Readings of a word considered: probability at least MIN_ALTERNATIVE, at most
-# MAX_READINGS per word; at most BEAM_WIDTH combinations are followed
+# MAX_READINGS per word; at most BEAM_WIDTH combinations are followed, and none
+# less probable than the best one by a factor of MAX_LOG_RATIO. The share of the
+# combinations left out counts as passing the checksum by chance. On the test
+# photos, 512 combinations give the same results as 4096, ten times faster.
 MIN_ALTERNATIVE = 0.01
 MAX_READINGS = 4
-BEAM_WIDTH = 4096
+BEAM_WIDTH = 512
+MAX_LOG_RATIO = math.log(1e6)
 
 # A chosen word whose probability given the checksum is below MIN_CONFIDENT_WORD
 # is uncertain. A seed less probable than MIN_SEED_PROBABILITY is not declared
@@ -124,12 +129,26 @@ class Analysis:
             (log-probability, words) of the most probable combinations of the
             plausible readings, most probable first.
         """
-        beam = [(0.0, [])]
+        # Each level keeps (log-probability, index of the parent in the previous
+        # level, word); the words are gathered once, at the end
+        levels = []
+        beam = [(0.0, -1, None)]
         for p in self.readings:
             options = sorted(p.items(), key=lambda item: -item[1])[:MAX_READINGS]
             options = [(w, math.log(q)) for w, q in options if q >= MIN_ALTERNATIVE] or [(options[0][0], math.log(options[0][1]))]
-            beam = sorted(((log_p + v, words + [w]) for log_p, words in beam for w, v in options), key=lambda b: -b[0])[:BEAM_WIDTH]
-        return beam
+            floor = beam[0][0] + options[0][1] - MAX_LOG_RATIO
+            beam = [(log_p + v, i, w) for i, (log_p, _, _) in enumerate(beam) for w, v in options if log_p + v >= floor]
+            beam.sort(key=itemgetter(0), reverse=True)  # stable: equal ones keep their order
+            del beam[BEAM_WIDTH:]
+            levels.append(beam)
+        out = []
+        for i, (log_p, _, _) in enumerate(levels[-1]):
+            words = []
+            for level in reversed(levels):
+                _, i, w = level[i]
+                words.append(w)
+            out.append((log_p, words[::-1]))
+        return out
 
 
     def word_probability(self, k: int, word: str) -> float:

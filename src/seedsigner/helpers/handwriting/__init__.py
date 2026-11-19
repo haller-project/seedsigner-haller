@@ -3,7 +3,7 @@
     SeedSigner 12- or 24-word card, or a free list of 12 to 24 words (blank or
     ruled paper, one or two columns, with or without numbers).
 
-        reading = read_seed(image, progress)
+        reading = read_seed(image, progress, on_word)
         analysis = reading.analyze(confirmed)
 
     Each word is cut out of the photo (page.py), normalized (preprocess.py),
@@ -22,7 +22,7 @@ import numpy as np
 from PIL import Image
 
 from .checksum import Analysis, MIN_SEED_PROBABILITY
-from .page import WordsNotFound, find_words
+from .page import RECTIFY_COSTS, SEARCH_COST, WordsNotFound, find_words
 from .preprocess import normalize_word
 from .word_model import MODEL_PATH
 
@@ -52,6 +52,16 @@ BLEND_MIN_SEED_PROBABILITY = 0.5
 MIN_WORD_SCORE = -1e4
 
 FIRST, LOWERCASE, BLEND = (1.0, 0.0), (0.0, 1.0), (BLEND_WEIGHT, 1 - BLEND_WEIGHT)
+
+# Expected duration of the steps of a reading, in seconds on a Pi Zero (see
+# Progress): loading of the models, reading of a word by the first network
+# (crop, normalization, network, decoder), by the second network or the blend
+# (the normalized word is reused), re-reading of a card word on its other crops.
+# The second reading is counted for half its cost before it is known to be needed.
+LOAD_COST = 0.8
+WORD_COST = 0.2
+OTHER_WORD_COST = 0.06
+REREAD_COST = 0.4
 
 _engine = []
 _engine_lock = threading.Lock()
@@ -109,6 +119,38 @@ class SeedReading:
                 or any(a is not b for a, b in zip(self._last[1], readings)):
             self._last = (confirmed, readings, Analysis(readings, self.min_seed_probability))
         return self._last[2]
+
+
+
+class Progress:
+    """
+        Progress of a reading, reported as a fraction to `report(fraction)`.
+        Each step done moves the fraction by its share of the cost (seconds on
+        a Pi Zero) expected to remain: the progress is steady when the expected
+        costs are right, and never goes back nor stops long when they are not.
+    """
+    def __init__(self, report, remaining: float):
+        self.report = report
+        self.remaining = remaining
+        self.fraction = 0.0
+        report(0.0)
+
+
+    def step(self, cost: float):
+        """
+            A step of expected cost `cost` is done.
+        """
+        share = 0.5 if self.remaining <= 2 * cost else cost / self.remaining
+        self.remaining = max(self.remaining - cost, 0.0)
+        self.fraction += (1 - self.fraction) * share
+        self.report(self.fraction)
+
+
+    def expect(self, remaining: float):
+        """
+            New estimate of the cost of the steps left.
+        """
+        self.remaining = remaining
 
 
 
@@ -211,16 +253,19 @@ def combine(a: list[tuple[str, float]], b: list[tuple[str, float]]) -> list[tupl
 
 
 
-def read_layout(reader: LayoutReader, report, weights: tuple[float, float], min_seed_probability: float) -> SeedReading:
+def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, float], min_seed_probability: float,
+                on_word=None) -> SeedReading:
     """
-        Reads the words of `reader.layout` with `weights`; `report(fraction)` is
-        called as the reading goes.
+        Reads the words of `reader.layout` with `weights`, reporting each one to
+        `progress` and to `on_word` (see read_seed).
     """
     layout = reader.layout
     words = []
     for k in range(layout.count):
-        report(0.9 * k / layout.count)
         words.append(reader.read(k, 0, weights))
+        progress.step(WORD_COST if weights == FIRST else OTHER_WORD_COST)
+        if on_word:
+            on_word(layout, k, words[-1])
     reading = SeedReading(layout.kind, words, min_seed_probability)
 
     # Re-reads of the least probable words, on their other crops
@@ -229,8 +274,8 @@ def read_layout(reader: LayoutReader, report, weights: tuple[float, float], min_
         for k in least_probable[:MAX_REREADS]:
             if reading.analyze().status == "valid":
                 break
-            report(0.9)
             others = [r for r in (reader.read(k, v, weights) for v in range(1, layout.variants)) if r is not None]
+            progress.step(REREAD_COST)
             if others:
                 best = max((r.candidates for r in others), key=top_probability)
                 words[k] = WordReading(words[k].image, combine(words[k].candidates, best))
@@ -247,46 +292,60 @@ def read_layout(reader: LayoutReader, report, weights: tuple[float, float], min_
 
 
 
-def read_page(reader: LayoutReader, report, weights: tuple[float, float], min_seed_probability: float) -> SeedReading:
+def read_page(reader: LayoutReader, progress: Progress, weights: tuple[float, float], min_seed_probability: float,
+              on_word=None) -> SeedReading:
     """
         Reads `reader.layout` with `weights`, and its list reading if it is a
         card found on part of its lines that gives no valid seed (the better
         one is kept).
     """
-    reading = read_layout(reader, lambda f: report(0.85 * f), weights, min_seed_probability)
+    reading = read_layout(reader, progress, weights, min_seed_probability, on_word)
     if reading.analyze().status != "valid" and reader.alternative():
-        other = read_layout(reader.alternative(), lambda f: report(0.85 + 0.15 * f), weights, min_seed_probability)
+        other = read_layout(reader.alternative(), progress, weights, min_seed_probability, on_word)
         if STATUS_RANK[other.analyze().status] > STATUS_RANK[reading.analyze().status]:
             reading = other
     return reading
 
 
 
-def read_seed(image: Image.Image, progress=None) -> SeedReading:
+def reading_cost(layout) -> float:
+    """
+        Expected cost of the reading of the words of `layout` (see Progress).
+    """
+    rectify = sum(RECTIFY_COSTS) if layout.kind != "list" else 0.0
+    return rectify + layout.count * (WORD_COST + OTHER_WORD_COST)
+
+
+
+def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
     """
         Reads the seed written on `image` (upright photo, full resolution).
-        `progress(fraction)` is called as the reading goes. Raises WordsNotFound
-        if no card or list with a valid number of words is found.
+        `progress(fraction)` is called as the reading goes, at least every
+        second or so on a Pi Zero; `on_word(layout, k, word_reading)` after the
+        first reading of each word. Raises WordsNotFound if no card or list with
+        a valid number of words is found.
     """
-    def report(fraction):
-        if progress:
-            progress(fraction)
-
-    report(0.0)
-    load_engine()
-    reader = LayoutReader(find_words(image.convert("L")))
-    reading = read_page(reader, lambda f: report(0.1 + 0.5 * f), FIRST, MIN_SEED_PROBABILITY)
+    progress = Progress(progress or (lambda fraction: None), SEARCH_COST + 12 * (WORD_COST + OTHER_WORD_COST))
+    if not _engine:
+        progress.expect(progress.remaining + LOAD_COST)
+        load_engine()
+        progress.step(LOAD_COST)
+    layout = find_words(image.convert("L"), progress.step)
+    progress.expect(reading_cost(layout))
+    reader = LayoutReader(layout)
+    reading = read_page(reader, progress, FIRST, MIN_SEED_PROBABILITY, on_word)
 
     # Not valid: read again by the second network, then by the blend of both;
     # a reading is kept if its status is better, or as good with a more
     # probable seed
     best = reading.analyze()
     if best.status != "valid":
-        second = ((LOWERCASE, LOWERCASE_MIN_SEED_PROBABILITY, 0.6), (BLEND, BLEND_MIN_SEED_PROBABILITY, 0.8))
-        for weights, min_seed_probability, start in second:
-            other = read_page(reader, lambda f, s=start: report(s + 0.2 * f), weights, min_seed_probability)
+        progress.expect(2 * layout.count * OTHER_WORD_COST)
+        second = ((LOWERCASE, LOWERCASE_MIN_SEED_PROBABILITY), (BLEND, BLEND_MIN_SEED_PROBABILITY))
+        for weights, min_seed_probability in second:
+            other = read_page(reader, progress, weights, min_seed_probability)
             analysis = other.analyze()
             if (STATUS_RANK[analysis.status], analysis.confidence) > (STATUS_RANK[best.status], best.confidence):
                 reading, best = other, analysis
-    report(1.0)
+    progress.report(1.0)
     return reading

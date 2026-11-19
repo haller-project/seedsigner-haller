@@ -1,7 +1,7 @@
 /*
- * Handwritten word recognition: integer word network and dictionary decoding.
- * See handwriting.h. The numpy implementation in word_model.py and decoder.py
- * computes the same results and must be kept in sync.
+ * Handwritten word recognition: integer word network, dictionary decoding and
+ * flood fill. See handwriting.h. The numpy implementation in word_model.py,
+ * decoder.py and page.py computes the same results and must be kept in sync.
  */
 #include "handwriting.h"
 
@@ -425,5 +425,31 @@ void hw_word_scores(const hw_trie *trie, const float *lp, int frames, float beam
     for (int m = 0; m < trie->words; m++) {
         const int n = trie->word_end[m];
         out[m] = logadd(L[n], B[n]);
+    }
+}
+
+
+void hw_border_connected(const uint8_t *mask, int h, int w, uint8_t *reached, int32_t *work)
+{
+    int top = 0;
+    memset(reached, 0, (size_t)h * w);
+    /* Depth-first fill from the border pixels of the mask; a pixel is marked
+     * when it is pushed, so the stack holds at most h * w pixels. */
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const int i = y * w + x;
+            if ((y == 0 || y == h - 1 || x == 0 || x == w - 1) && mask[i] && !reached[i]) {
+                reached[i] = 1;
+                work[top++] = i;
+            }
+        }
+    while (top > 0) {
+        const int i = work[--top], y = i / w, x = i % w;
+        const int next[4] = {x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1};
+        for (int k = 0; k < 4; k++)
+            if (next[k] >= 0 && mask[next[k]] && !reached[next[k]]) {
+                reached[next[k]] = 1;
+                work[top++] = next[k];
+            }
     }
 }

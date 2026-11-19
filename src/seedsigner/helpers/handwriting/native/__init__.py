@@ -1,8 +1,9 @@
 """
-    Optional C implementation of the word network and of the dictionary
-    decoding (handwriting.c), built by running `make` in this directory.
-    Without the shared library, the numpy implementation gives the same network
-    output and word scores within about 2e-3.
+    Optional C implementation of the word network, of the dictionary decoding
+    and of the flood fill used to find the card (handwriting.c), built by
+    running `make` in this directory. Without the shared library, the numpy
+    implementation gives the same network output and word scores within about
+    2e-3, and the same flood fill.
 """
 import ctypes
 import os
@@ -55,5 +56,8 @@ def load() -> ctypes.CDLL | None:
             lib.hw_word_scores.restype = None
             lib.hw_word_scores.argtypes = [ctypes.POINTER(Trie), ctypes.c_void_p, ctypes.c_int, ctypes.c_float,
                                            ctypes.c_void_p, ctypes.c_void_p]
+            lib.hw_border_connected.restype = None
+            lib.hw_border_connected.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+                                                ctypes.c_void_p]
         _library.append(lib)
     return _library[0]

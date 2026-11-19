@@ -18,6 +18,7 @@ import math
 import numpy as np
 from PIL import Image, ImageFilter
 
+from . import native
 from .preprocess import remove_long_runs, text_rows
 
 SEED_LENGTHS = (12, 15, 18, 21, 24)
@@ -72,6 +73,20 @@ PAPER_EROSION = 6            # pixels of paper left out along the edges of the s
 EDGE_BAND = 10               # ink this close to the frame border: the list goes on beyond the photo
 COLUMN_CORRIDORS = (1.5, 1.0)  # empty width between two columns, in line heights; the second if the first fails
 
+# Expected duration of the steps of the search, in seconds on a Pi Zero, reported
+# to `step(cost)` as they are done for a steady progress bar. SEARCH_COST is the
+# whole search on a list (8 card masks tried in vain); the card is faster.
+CARD_MASK_COST = 0.12
+CARD_LINES_COST = 0.15
+RECTIFY_COSTS = (0.6, 1.0)   # transform, then printed lines erased
+INK_MASK_COST = 0.85
+PAGE_ANGLE_COST = 0.45
+ROTATION_COST = 0.6
+LINES_COST = 0.3
+NUMBER_COST = 0.085          # per line
+SEARCH_COST = 8 * CARD_MASK_COST + CARD_LINES_COST + INK_MASK_COST + PAGE_ANGLE_COST + ROTATION_COST + LINES_COST \
+    + 12 * NUMBER_COST
+
 
 
 class WordsNotFound(Exception):
@@ -102,12 +117,14 @@ class WordLayout:
             one gives no valid seed (a card found on part of its printed lines
             may be a ruled sheet); it raises WordsNotFound if there is none
     """
-    def __init__(self, kind: str, count: int, orders: list[list[int]], variants: int, crop, alternative=None):
+    def __init__(self, kind: str, count: int, orders: list[list[int]], variants: int, crop, outline,
+                 alternative=None):
         self.kind = kind
         self.count = count
         self.orders = orders
         self.variants = variants
         self._crop = crop
+        self._outline = outline
         self.alternative = alternative
 
 
@@ -120,30 +137,46 @@ class WordLayout:
         return self._crop(k, variant)
 
 
+    def outline(self, k: int) -> list[tuple[float, float]]:
+        """
+            Corners of crop k (variant 0) on the photo, clockwise from the top
+            left.
+        """
+        return self._outline(k)
 
-def find_words(image: Image.Image) -> WordLayout:
+
+
+def no_step(cost: float):
+    """
+        Default `step` function: the progress is not reported.
+    """
+
+
+
+def find_words(image: Image.Image, step=no_step) -> WordLayout:
     """
         Words of the card or list on `image` (upright grayscale photo, full
         resolution). Raises WordsNotFound if no card is found and no list with a
-        valid number of lines either.
+        valid number of lines either. `step(cost)` is called as the search goes
+        (see SEARCH_COST).
     """
-    return locate(image, image.reduce(2))
+    return locate(image, image.reduce(2), step)
 
 
 
-def locate(image: Image.Image, half: Image.Image) -> WordLayout:
+def locate(image: Image.Image, half: Image.Image, step=no_step) -> WordLayout:
     """
         find_words, with `half` the photo reduced by half (for example decoded
         at half size from a JPEG file).
     """
-    quad, found, kind = find_card(half)
+    quad, found, kind = find_card(half, step)
     if found > MIN_CARD_LINES:
         scale = image.width / half.width
-        layout = card_layout(image, [(x * scale, y * scale) for x, y in quad], kind)
+        layout = card_layout(image, [(x * scale, y * scale) for x, y in quad], kind, step)
         if found < 1.0:
-            layout.alternative = lambda: list_layout(image, half)
+            layout.alternative = lambda: list_layout(image, half, step)
         return layout
-    return list_layout(image, half)
+    return list_layout(image, half, step)
 
 
 
@@ -227,19 +260,34 @@ def spread_runs(reached: np.ndarray, mask: np.ndarray, axis: int) -> np.ndarray:
     return touched[run_ids]
 
 
-def inner_area(mask: np.ndarray) -> np.ndarray:
+def border_connected(mask: np.ndarray, use_native: bool = True) -> np.ndarray:
     """
-        Part of `mask` not connected to the image border (inside of the card or
-        sheet, whatever the color of the table), or the whole mask if that part
-        is too small.
+        Pixels of `mask` connected to the image border through pixels of the
+        mask (4-connectivity): by the C library if it is built, else by
+        spreading along the runs of the mask until nothing changes.
     """
+    lib = native.load() if use_native else None
+    if lib is not None:
+        m = np.ascontiguousarray(mask, np.uint8)
+        reached, work = np.empty_like(m), np.empty(m.size, np.int32)
+        lib.hw_border_connected(m.ctypes.data, m.shape[0], m.shape[1], reached.ctypes.data, work.ctypes.data)
+        return reached.astype(bool)
     reached = np.zeros_like(mask)
     reached[0], reached[-1], reached[:, 0], reached[:, -1] = mask[0], mask[-1], mask[:, 0], mask[:, -1]
     count = -1
     while reached.sum() != count:
         count = reached.sum()
         reached = spread_runs(spread_runs(reached, mask, 1), mask, 0)
-    inner = mask & ~reached
+    return reached
+
+
+def inner_area(mask: np.ndarray) -> np.ndarray:
+    """
+        Part of `mask` not connected to the image border (inside of the card or
+        sheet, whatever the color of the table), or the whole mask if that part
+        is too small.
+    """
+    inner = mask & ~border_connected(mask)
     return inner if inner.sum() > 0.02 * mask.size else mask
 
 
@@ -304,7 +352,7 @@ def plausible(quad: list | None, size: tuple[int, int], ratio: float) -> bool:
     return abs(width / height / ratio - 1) < 0.15
 
 
-def card_candidates(photo: Image.Image):
+def card_candidates(photo: Image.Image, step=no_step):
     """
         Plausible quadrilaterals for the light inner area of the card, best
         guess first: lighting-corrected threshold, then global Otsu threshold,
@@ -332,12 +380,12 @@ def card_candidates(photo: Image.Image):
 
     # first candidate: as found on the blank card for CARD_CORNERS
     quad = None
-    for mask in (inner_area(normalized > 0.92 * 128), inner_area(light)):
+    for mask in (normalized > 0.92 * 128, light):
         try:
-            quad = area_corners(mask, reduction)
+            quad = area_corners(inner_area(mask), reduction)
         except ValueError:
             quad = None
-            continue
+        step(CARD_MASK_COST)
         if plausible(quad, photo.size, ratio):
             break
     if new(quad):
@@ -347,7 +395,8 @@ def card_candidates(photo: Image.Image):
             try:
                 quad = area_corners(inner_area(mask), reduction)
             except ValueError:
-                continue
+                quad = None
+            step(CARD_MASK_COST)
             if new(quad):
                 yield quad
 
@@ -396,7 +445,7 @@ def count_card_lines(photo: Image.Image, quad: list, kind: str) -> int:
     return found
 
 
-def find_card(photo: Image.Image) -> tuple[list | None, float, str]:
+def find_card(photo: Image.Image, step=no_step) -> tuple[list | None, float, str]:
     """
         (quadrilateral, share of printed lines found, card kind) of the best card
         candidate. The 24-word card wins as soon as it finds 75 % of its lines
@@ -405,10 +454,11 @@ def find_card(photo: Image.Image) -> tuple[list | None, float, str]:
         unless it is a 12-word card on which the 24-word card is plausible.
     """
     best = (None, 0.0, "card12")
-    for quad in card_candidates(photo):
+    for quad in card_candidates(photo, step):
         share = {"card12": count_card_lines(photo, quad, "card12") / 12, "card24": 0.0}
         if share["card12"] >= MIN_CARD24_TRY:
             share["card24"] = count_card_lines(photo, quad, "card24") / 24
+        step(CARD_LINES_COST)
         kind = "card24" if share["card24"] >= 0.75 else "card12"
         if (kind == "card24", share[kind]) > (best[2] == "card24", best[1]):
             best = (quad, share[kind], kind)
@@ -449,17 +499,19 @@ def erase_line(a: np.ndarray, darkness: np.ndarray, background: np.ndarray, xa: 
         a[yy, xs] = background[yy, xs]
 
 
-def card_layout(photo: Image.Image, quad: list, kind: str) -> WordLayout:
+def card_layout(photo: Image.Image, quad: list, kind: str, step=no_step) -> WordLayout:
     """
         Card rectified onto its template (on the first crop), printed lines
         erased; crops along the printed lines.
     """
     lines, number_ends = CARD_LINES[kind], NUMBER_ENDS[kind]
+    coefficients = homography(quad, CARD_CORNERS[kind])
     page = []
 
     def rectified():
         if not page:
-            card = photo.transform(CARD_SIZE, Image.PERSPECTIVE, homography(quad, CARD_CORNERS[kind]), Image.BILINEAR)
+            card = photo.transform(CARD_SIZE, Image.PERSPECTIVE, coefficients, Image.BILINEAR)
+            step(RECTIFY_COSTS[0])
             a = np.asarray(card, np.float32)
             background = local_mean(a, 15)
             darkness = background - a
@@ -469,10 +521,10 @@ def card_layout(photo: Image.Image, quad: list, kind: str) -> WordLayout:
                 ys.append(adjust_line(darkness, x0, x1, y))
                 erase_line(a, darkness, background, x0 - 4, x1 + 6, ys[-1])
             page.extend([Image.fromarray(np.clip(a, 0, 255).astype(np.uint8)), ys])
+            step(RECTIFY_COSTS[1])
         return page
 
-    def crop(k, variant):
-        card, ys = rectified()
+    def box(k, variant):
         x0, x1, _ = lines[k]
         left = x0 - 4
         top, bottom = CARD_BAND if variant == 0 else CARD_TALL_BAND
@@ -480,10 +532,20 @@ def card_layout(photo: Image.Image, quad: list, kind: str) -> WordLayout:
             left = number_ends[k] + NUMBER_MARGIN
             if left >= x0 - 4:
                 return None
-        y = ys[k]
-        return card.crop((left, int(y - top * LINE_SPACING), x1 + 6, int(y + bottom * LINE_SPACING)))
+        y = rectified()[1][k]
+        return left, int(y - top * LINE_SPACING), x1 + 6, int(y + bottom * LINE_SPACING)
 
-    return WordLayout(kind, len(lines), [list(range(len(lines)))], 3, crop)
+    def crop(k, variant):
+        b = box(k, variant)
+        return rectified()[0].crop(b) if b else None
+
+    def outline(k):
+        x0, y0, x1, y1 = box(k, 0)
+        a, b, c, d, e, f, g, h = coefficients
+        return [((a * u + b * v + c) / (g * u + h * v + 1), (d * u + e * v + f) / (g * u + h * v + 1))
+                for u, v in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
+
+    return WordLayout(kind, len(lines), [list(range(len(lines)))], 3, crop, outline)
 
 
 
@@ -868,7 +930,7 @@ def segments(m: np.ndarray) -> tuple[list[list[int]], tuple[int, int]]:
     return out, (y0, y1)
 
 
-def word_starts(photo: Image.Image, boxes: list) -> list[int | None]:
+def word_starts(photo: Image.Image, boxes: list, step=no_step) -> list[int | None]:
     """
         Numbered list: in each line, the widest gap among the first four
         (>= 0.25 line height, >= 1.5 times the next three, within 2.2 heights
@@ -881,6 +943,7 @@ def word_starts(photo: Image.Image, boxes: list) -> list[int | None]:
     found = []
     for box in boxes:
         m = clean_lines(binarize(erase_ruled_lines(np.asarray(photo.crop(box), np.float32))))
+        step(NUMBER_COST)
         segs, (y0, y1) = segments(m)
         h = max(y1 - y0, 1)
         gaps = [segs[j + 1][0] - segs[j][1] for j in range(len(segs) - 1)]
@@ -914,44 +977,56 @@ def reading_orders(columns: int, count: int) -> list[list[int]]:
     return orders
 
 
-def list_layout(photo: Image.Image, half: Image.Image) -> WordLayout:
+def list_layout(photo: Image.Image, half: Image.Image, step=no_step) -> WordLayout:
     """
         Free list: page straightened, lines and numbers found on `half`; crops
         cut from `photo` with the same rotation.
     """
     ink = ink_mask(half)
+    step(INK_MASK_COST)
     at_edge = ink is not None and ink_at_edge(ink)
     angle = 0.0
     page = half
     if ink is not None:
         angle = page_angle(ink)
+        step(PAGE_ANGLE_COST)
         if abs(angle) >= MIN_PAGE_ANGLE:
             page = half.rotate(angle, resample=Image.BILINEAR, fillcolor=int(np.median(np.asarray(half.reduce(8)))))
             ink = np.asarray(Image.fromarray(ink.astype(np.uint8) * 255).rotate(angle, resample=Image.NEAREST,
                                                                                fillcolor=0)) > 127
         else:
             angle = 0.0
+        step(ROTATION_COST)
     columns = find_lines(page, ink) if ink is not None else []
+    step(LINES_COST)
     count = sum(len(c) for c in columns)
     if count not in SEED_LENGTHS:
         raise WordsNotFound(f"{count} lines found", at_edge=at_edge, line_count=count)
     boxes = []
     for column in columns:  # numbers removed column by column (each column has its own alignment)
         boxes += [(x, b[1], b[2], b[3]) if x is not None and b[0] < x < b[2] else b
-                  for b, x in zip(column, word_starts(page, column))]
+                  for b, x in zip(column, word_starts(page, column, step))]
 
     f = int(round(photo.width / half.width))
     matrix = rotation_matrix(angle, half.size) if angle else None
     fill = int(np.median(np.asarray(photo.reduce(16)))) if angle else 255
 
+    def crop_coefficients(k):
+        """ (x0, y0, x1, y1) of crop k on the straightened photo, affine coefficients to the photo """
+        x0, y0, x1, y1 = (int(round(v * f)) for v in boxes[k])
+        a, b, c, d, e, g = matrix or (1, 0, 0, 0, 1, 0)
+        return (x0, y0, x1, y1), (a, b, a * x0 + b * y0 + f * c, d, e, d * x0 + e * y0 + f * g)
+
     def crop(k, variant):
         if variant:
             return None
-        x0, y0, x1, y1 = (int(round(v * f)) for v in boxes[k])
+        (x0, y0, x1, y1), coefficients = crop_coefficients(k)
         if matrix is None:
             return photo.crop((x0, y0, x1, y1))
-        a, b, c, d, e, g = matrix
-        coefficients = (a, b, a * x0 + b * y0 + f * c, d, e, d * x0 + e * y0 + f * g)
         return photo.transform((x1 - x0, y1 - y0), Image.AFFINE, coefficients, Image.BILINEAR, fillcolor=fill)
 
-    return WordLayout("list", count, reading_orders(len(columns), count), 1, crop)
+    def outline(k):
+        (x0, y0, x1, y1), (a, b, c, d, e, g) = crop_coefficients(k)
+        return [(a * u + b * v + c, d * u + e * v + g) for u, v in ((0, 0), (x1 - x0, 0), (x1 - x0, y1 - y0), (0, y1 - y0))]
+
+    return WordLayout("list", count, reading_orders(len(columns), count), 1, crop, outline)

@@ -168,7 +168,47 @@ def test_second_readings_only_when_the_seed_is_not_valid(monkeypatch):
     valid = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".split()
     for words, second in ((valid, 0), (valid[:-1] + ["zoo"], len(valid))):
         calls = counting_networks(monkeypatch)
-        monkeypatch.setattr(hw, "find_words", lambda image, words=words: fake_layout(words))
+        monkeypatch.setattr(hw, "find_words", lambda image, step, words=words: fake_layout(words))
         reading = hw.read_seed(Image.new("L", (10, 10)))
         assert [w.candidates[0][0] for w in reading.words] == words
         assert calls == {"first": len(words), "lowercase": second}
+
+
+
+def test_progress_is_steady_and_moves_forward():
+    """ With exact costs the progress is proportional to the work done; with wrong ones it still moves forward. """
+    import seedsigner.helpers.handwriting as hw
+    fractions = []
+    progress = hw.Progress(fractions.append, 10.0)
+    for _ in range(4):
+        progress.step(1.0)
+    assert fractions == pytest.approx([0.0, 0.1, 0.2, 0.3, 0.4])
+    progress.expect(30.0)
+    for _ in range(40):
+        progress.step(1.0)
+    assert all(b > a for a, b in zip(fractions, fractions[1:])) and fractions[-1] < 1.0
+
+
+
+def test_read_seed_reports_progress(monkeypatch):
+    """ The progress goes forward from 0 to 1, and each word read is reported. """
+    import seedsigner.helpers.handwriting as hw
+    words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".split()
+    monkeypatch.setattr(hw, "find_words", lambda image, step: fake_layout(words))
+    fractions, read = [], []
+    hw.read_seed(Image.new("L", (10, 10)), progress=fractions.append,
+                 on_word=lambda layout, k, reading: read.append((k, reading.candidates[0][0])))
+    assert fractions[0] == 0.0 and fractions[-1] == 1.0
+    assert all(b > a for a, b in zip(fractions, fractions[1:]))
+    assert read == list(enumerate(words))
+
+
+
+@needs_native
+def test_border_connected_c_equals_numpy():
+    """ The C flood fill marks the same pixels as the numpy run spreading. """
+    from seedsigner.helpers.handwriting.page import border_connected
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        mask = rng.random((rng.integers(1, 50), rng.integers(1, 50))) < rng.uniform(0.2, 0.9)
+        assert np.array_equal(border_connected(mask), border_connected(mask, use_native=False))

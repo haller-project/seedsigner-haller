@@ -1,5 +1,6 @@
 /*
- * Handwritten word recognition: integer word network and dictionary decoding.
+ * Handwritten word recognition: integer word network, dictionary decoding and
+ * flood fill used to find the seed card on the photo.
  *
  * Pure C99, no allocation: the caller provides the work buffers, whose sizes
  * are given by hw_network_work_size() and hw_decoder_work_size(). hw_init()
@@ -75,5 +76,13 @@ size_t hw_decoder_work_size(const hw_trie *trie);
  * work: at least hw_decoder_work_size() bytes, 4-byte aligned.
  */
 void hw_word_scores(const hw_trie *trie, const float *lp, int frames, float beam, void *work, float *out);
+
+/*
+ * Sets reached (h x w, row-major) to 1 on the pixels of mask (h x w, nonzero:
+ * in the mask) connected to the border of the image through pixels of the
+ * mask, 4-connectivity, and to 0 elsewhere.
+ * work: at least h * w int32 values.
+ */
+void hw_border_connected(const uint8_t *mask, int h, int w, uint8_t *reached, int32_t *work);
 
 #endif

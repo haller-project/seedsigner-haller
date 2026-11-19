@@ -60,6 +60,10 @@ jobs:
           pip install -e .
       - name: Compile translations
         run: python setup.py compile_catalog
+      - name: Build the handwriting C library
+        # Required by the handwritten seed reader; tests/test_handwriting_vectors.py
+        # checks it bit for bit (it fails instead of skipping when CI is set)
+        run: make -C src/seedsigner/helpers/handwriting/native
       - name: Test with pytest
         run: |
           mkdir -p artifacts

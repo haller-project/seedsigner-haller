@@ -1,7 +1,8 @@
 /*
  * Handwritten word recognition: integer word network, dictionary decoding and
- * flood fill. See handwriting.h. The numpy implementation in word_model.py,
- * decoder.py and page.py computes the same results and must be kept in sync.
+ * flood fill. See handwriting.h. This is the only implementation: any change
+ * that alters its output requires new reference vectors (resources/handwriting/
+ * *-vectors.json, written by haller.vectors).
  */
 #include "handwriting.h"
 
@@ -14,8 +15,9 @@
 #define NEG (-1e30f)
 
 
-/* acc + a.lo * b.lo + a.hi * b.hi on pairs of int16, wrapping on overflow */
-#if defined(__ARM_FEATURE_DSP) || (defined(__arm__) && defined(__ARM_ARCH) && __ARM_ARCH >= 6)
+/* acc + a.lo * b.lo + a.hi * b.hi on pairs of int16, wrapping on overflow;
+ * HW_GENERIC forces the portable C version (to compare both on ARM) */
+#if !defined(HW_GENERIC) && (defined(__ARM_FEATURE_DSP) || (defined(__arm__) && defined(__ARM_ARCH) && __ARM_ARCH >= 6))
 static inline int32_t smlad(uint32_t a, uint32_t b, int32_t acc)
 {
     int32_t r;

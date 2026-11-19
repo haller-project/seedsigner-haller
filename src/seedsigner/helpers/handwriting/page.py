@@ -246,39 +246,15 @@ def fit_line(t: np.ndarray, v: np.ndarray) -> tuple[float, float]:
     return a, b
 
 
-def spread_runs(reached: np.ndarray, mask: np.ndarray, axis: int) -> np.ndarray:
-    """
-        Extends `reached` to every run of `mask` along `axis` that touches it.
-    """
-    if axis == 0:
-        return spread_runs(reached.T, mask.T, 1).T
-    starts = mask.copy()
-    starts[:, 1:] &= ~mask[:, :-1]
-    run_ids = np.cumsum(starts.ravel()).reshape(mask.shape) * mask
-    touched = np.bincount(run_ids.ravel(), weights=reached.ravel(), minlength=int(run_ids.max()) + 1) > 0
-    touched[0] = False
-    return touched[run_ids]
-
-
-def border_connected(mask: np.ndarray, use_native: bool = True) -> np.ndarray:
+def border_connected(mask: np.ndarray) -> np.ndarray:
     """
         Pixels of `mask` connected to the image border through pixels of the
-        mask (4-connectivity): by the C library if it is built, else by
-        spreading along the runs of the mask until nothing changes.
+        mask (4-connectivity), by the C library.
     """
-    lib = native.load() if use_native else None
-    if lib is not None:
-        m = np.ascontiguousarray(mask, np.uint8)
-        reached, work = np.empty_like(m), np.empty(m.size, np.int32)
-        lib.hw_border_connected(m.ctypes.data, m.shape[0], m.shape[1], reached.ctypes.data, work.ctypes.data)
-        return reached.astype(bool)
-    reached = np.zeros_like(mask)
-    reached[0], reached[-1], reached[:, 0], reached[:, -1] = mask[0], mask[-1], mask[:, 0], mask[:, -1]
-    count = -1
-    while reached.sum() != count:
-        count = reached.sum()
-        reached = spread_runs(spread_runs(reached, mask, 1), mask, 0)
-    return reached
+    m = np.ascontiguousarray(mask, np.uint8)
+    reached, work = np.empty_like(m), np.empty(m.size, np.int32)
+    native.load().hw_border_connected(m.ctypes.data, m.shape[0], m.shape[1], reached.ctypes.data, work.ctypes.data)
+    return reached.astype(bool)
 
 
 def inner_area(mask: np.ndarray) -> np.ndarray:

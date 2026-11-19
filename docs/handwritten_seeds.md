@@ -6,11 +6,9 @@
 [Accuracy](#accuracy)); the user experience is not final. Known limits:
 
 - numpy is not installed in SeedSigner's CI, so the engine tests
-  (`tests/test_handwriting*.py`) are skipped there; they run wherever numpy is
-  installed.
-- The C library is not built by SeedSigner OS (see
-  [Native library](#native-library)); without it the reading falls back to
-  numpy and is 4 to 7 times slower.
+  (`tests/test_handwriting_core.py`) are skipped there; the reference vectors
+  of the C library (`tests/test_handwriting_vectors.py`) need no numpy and run
+  there (see [C library](#c-library)).
 - A blank official card is read as 12 uncertain words instead of being
   rejected.
 - The reading cannot be cancelled once started.
@@ -64,7 +62,7 @@ The engine is `seedsigner.helpers.handwriting`:
 | `word_model.py` | small convolutional network (about 160 000 parameters, CTC), run in 16-bit integers; two sets of weights, see [The Haller-1 model](#the-haller-1-model) |
 | `decoder.py` | log-likelihood of each of the 2 048 BIP39 words (prefix tree, beam pruning); a line number before the word is accepted |
 | `checksum.py` | combinations of plausible words, BIP39 checksum, confidence, uncertain words |
-| `native/handwriting.c` | network, decoder and the flood fill of the card search in portable C (no allocation, no CPython), used through `ctypes` when built; the numpy code gives the same network output and word scores within 2e-3, and the same flood fill |
+| `native/handwriting.c` | network, decoder and the flood fill of the card search in portable C (no allocation, no CPython), used through `ctypes`; required, see [C library](#c-library) |
 
 There is no letter segmentation: the network reads the whole word, and the
 dictionary decoding only ever returns BIP39 words. The checksum then rules out
@@ -123,24 +121,25 @@ Zero (the transfer to the display takes 37 ms, during which the reading goes
 on).
 
 
-## Native library
+## C library
 
-`native/handwriting.c` is optional. `native/__init__.py` loads
-`libhandwriting.so` from the same directory with `ctypes`; if the file is
-missing or cannot be loaded, `word_model.py` and `decoder.py` run their numpy
-implementation, which gives the same network output and word scores within
-2e-3 (`tests/test_handwriting_core.py`
-checks it). Only the speed differs:
+The network, the dictionary decoding and the flood fill of the card search
+exist only in C, in `native/handwriting.c`: there is no Python fallback,
+which would be 4 to 7 times slower on a Pi Zero (35 s for a card, 45 s for a
+list) and would hide a library left unbuilt. `native/__init__.py` loads
+`libhandwriting.so` from the same directory with `ctypes`; if it is missing,
+loading the word models raises `LibraryNotBuilt` with the command to build
+it, and the error is logged.
 
-| Pi Zero, 12 words | with the library | numpy only |
-|---|---|---|
-| card | 5 s | 35 s |
-| list | 7 to 10 s | 45 s |
+Dependencies: no new Python dependency. Pillow, numpy and embit already ship
+with SeedSigner OS (numpy is listed in `requirements-raspi.txt` and imported
+at startup by `BackgroundImportThread`); the small C library is
+cross-compiled with the OS.
 
 The C file has no dependency besides `libm`, allocates nothing and does not use
 the CPython API. On ARMv6 it uses the `SMLAD` instruction when the compiler
 defines `__ARM_FEATURE_DSP` (GCC does for `-mcpu=arm1176jzf-s`), and portable C
-otherwise.
+otherwise or with `-DHW_GENERIC`; both give the same bits.
 
 ```bash
 # development machine
@@ -149,15 +148,55 @@ make -C src/seedsigner/helpers/handwriting/native
 make -C src/seedsigner/helpers/handwriting/native CFLAGS_ARCH="-mcpu=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard"
 ```
 
-The built library is ignored by git.
+The built library is ignored by git. SeedSigner OS builds it for each board
+when the image is built (Buildroot package `seedsigner-handwriting`, branch
+`handwritten-seed` of the SeedSigner OS fork): the Buildroot toolchain wrapper
+adds the board's CPU flags (pi0: `-mcpu=arm1176jzf-s -mfpu=vfp
+-mfloat-abi=hard`), the other flags are those of the Makefile. The device has
+no compiler.
 
-SeedSigner OS copies the application sources into the image and builds
-nothing, and the device has no compiler. The library therefore has to be
-cross-compiled when the image is built, for example from the board's
-`post-build.sh` with the buildroot toolchain
-(`make -C <app>/src/seedsigner/helpers/handwriting/native CC=${HOST_DIR}/bin/<tuple>-gcc CFLAGS_ARCH=...`,
-with the flags of each board). Without this step the image still works, with
-the numpy timings above.
+### Reference vectors
+
+Each set of weights comes with reference vectors written with it by
+`haller.vectors` (Haller repository, also run by `haller.quantize`):
+`resources/handwriting/haller-1-capitals-vectors.json` and
+`haller-1-lowercase-vectors.json`. Each file holds 62 word strips, all
+synthetic (20 in capitals from simulated photos, 20 mixed-case words of the
+training generator, 20 cursive words, an empty strip and a strip of noise of
+the maximum width), and for each one the output of the C library: SHA-256 of
+the network logits, SHA-256 of the scores of the 2,048 BIP39 words, and the 5
+best words with their scores. `tests/test_handwriting_vectors.py` checks that
+the library gives the same bits, with ctypes alone (no numpy), so it runs in
+SeedSigner's CI, which builds the library first. It was also run on a Pi Zero
+with the library cross-compiled by SeedSigner OS (SMLAD) and with
+`-DHW_GENERIC`.
+
+Haller also checks, when it writes the vectors, that the quantized C model
+reads them as the float model it comes from (PyTorch): see the Haller
+README for the tolerance.
+
+The vectors must be written again for every new set of weights (Haller-2…),
+and for any change of `handwriting.c` that alters its output (none is
+expected: a change that keeps the results must keep the vectors):
+
+```bash
+# in the Haller repository, SeedSigner's sources on PYTHONPATH
+python -m haller.vectors src/seedsigner/resources/handwriting/haller-N-capitals.npz \
+    --strips capitals=EVAL.npz --strips mixed=SHARD.npz --strips cursive=CURSIVE_VAL.npz \
+    --float MODEL_FLOAT.npz
+```
+
+### Tests in the CI (proposal)
+
+The engine tests that need numpy (`tests/test_handwriting_core.py`: page
+detection, normalization, reading of rendered words, progress) are skipped in
+the CI, where `tests/base.py` replaces numpy with a mock. Adding numpy to
+`tests/requirements.txt`, hash-locked like the other test dependencies, would
+run them there too: numpy is already a runtime dependency on the device, so
+the CI would test what ships. Not done here, to leave that choice to the
+maintainers: it adds a large wheel to the CI install, and the C library, the
+part most likely to differ between platforms, is already covered by the
+vectors.
 
 
 ## Accuracy
@@ -209,7 +248,7 @@ on photos taken by the device (12 words), from the click to the result screen:
 | result screen | 0.2 s | 0.2 s | 0.2 s |
 | **total** | **6.1 s** | **8.1 to 8.4 s** | **9.2 to 11.4 s** |
 
-The word models (1 s, plus numpy, already imported at startup by
+The word models (1 s; numpy is already imported at startup by
 SeedSigner) are loaded while the photo is framed; the camera preview runs at
 3.3 instead of 5 frames per second during that second. The progress bar never
 stays still for more than 0.9 s. The display of the reading costs 3 to 5 % of

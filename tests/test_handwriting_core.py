@@ -10,12 +10,16 @@ if not isinstance(np, types.ModuleType):  # replaced by a mock in tests/base.py
 from PIL import Image, ImageDraw, ImageFont
 
 from seedsigner.helpers.handwriting import native
-from seedsigner.helpers.handwriting.decoder import ALPHABET, Decoder
-from seedsigner.helpers.handwriting.preprocess import INPUT_HEIGHT, normalize_word
-from seedsigner.helpers.handwriting.word_model import MODEL_PATH, NUM_CLASSES, WordModel
+from seedsigner.helpers.handwriting.decoder import Decoder
+from seedsigner.helpers.handwriting.preprocess import normalize_word
+from seedsigner.helpers.handwriting.word_model import ALPHABET, MODEL_PATH, NUM_CLASSES, WordModel
 
-needs_native = pytest.mark.skipif(native.load() is None,
-                                  reason="native library not built (make -C src/seedsigner/helpers/handwriting/native)")
+try:
+    native.load()
+except native.LibraryNotBuilt:
+    if os.environ.get("CI"):
+        raise
+    pytest.skip("C library not built (make -C src/seedsigner/helpers/handwriting/native)", allow_module_level=True)
 
 FONT_PATH = os.path.join(os.path.dirname(__file__), "..", "src", "seedsigner", "resources", "fonts",
                          "OpenSans-Regular.ttf")
@@ -48,47 +52,12 @@ def frames_of(text: str) -> list[int]:
 
 
 
-@needs_native
-def test_network_native_equals_numpy():
-    """ The C library and the numpy code give bit-identical logits. """
-    rng = np.random.default_rng(1)
-    inks = [ink_map_of(w) for w in ("abandon", "zoo", "wrist", "17 ocean")]
-    inks += [rng.integers(0, 256, (INPUT_HEIGHT, w), dtype=np.uint8) for w in (8, 9, 63, 256)]
-    assert all(ink is not None for ink in inks)
-    c_model, np_model = WordModel(), WordModel(use_native=False)
-    for ink in inks:
-        a, b = c_model.logits(ink), np_model.logits(ink)
-        assert a.shape == b.shape == (NUM_CLASSES, max(1, ink.shape[1] // 4))
-        assert np.array_equal(a, b)
-        np.testing.assert_allclose(c_model.log_probs(ink), np_model.log_probs(ink), atol=1e-5)
-
-
-
 def test_perfect_word():
     """ A clean reading of a word, with or without a line number, is decoded. """
-    for use_native in (False, True):
-        if use_native and native.load() is None:
-            continue
-        decoder = Decoder(use_native=use_native)
-        for text, word in (("abandon", "abandon"), ("add", "add"), ("12zoo", "zoo"), ("7wrist", "wrist")):
-            scores = decoder.scores(perfect_log_probs(frames_of(text)))
-            assert decoder.words[int(np.argmax(scores))] == word
-
-
-
-@needs_native
-def test_decoder_native_equals_numpy():
-    """ Same scores, within float rounding, for words close to the best one. """
-    rng = np.random.default_rng(2)
-    c_decoder, np_decoder = Decoder(), Decoder(use_native=False)
-    for text in ("abandon", "3zoo", "letter"):
-        lp = perfect_log_probs(frames_of(text)) + rng.normal(0, 1.0, (NUM_CLASSES, len(frames_of(text))))
-        lp = (lp - np.log(np.exp(lp).sum(0))).astype(np.float32)
-        a, b = c_decoder.scores(lp), np_decoder.scores(lp)
-        assert np.argmax(a) == np.argmax(b)
-        near = b > b.max() - 20
-        np.testing.assert_allclose(a[near], b[near], atol=2e-3)
-        assert ((a < -1e29) == (b < -1e29)).all()
+    decoder = Decoder()
+    for text, word in (("abandon", "abandon"), ("add", "add"), ("12zoo", "zoo"), ("7wrist", "wrist")):
+        scores = decoder.scores(perfect_log_probs(frames_of(text)))
+        assert decoder.words[int(np.argmax(scores))] == word
 
 
 
@@ -204,11 +173,21 @@ def test_read_seed_reports_progress(monkeypatch):
 
 
 
-@needs_native
-def test_border_connected_c_equals_numpy():
-    """ The C flood fill marks the same pixels as the numpy run spreading. """
+def test_border_connected():
+    """ The C flood fill marks the pixels that a breadth-first search from the border reaches. """
     from seedsigner.helpers.handwriting.page import border_connected
     rng = np.random.default_rng(0)
     for _ in range(200):
         mask = rng.random((rng.integers(1, 50), rng.integers(1, 50))) < rng.uniform(0.2, 0.9)
-        assert np.array_equal(border_connected(mask), border_connected(mask, use_native=False))
+        h, w = mask.shape
+        reached = np.zeros_like(mask)
+        queue = [(y, x) for y in range(h) for x in range(w) if mask[y, x] and (y in (0, h - 1) or x in (0, w - 1))]
+        for y, x in queue:
+            reached[y, x] = True
+        while queue:
+            y, x = queue.pop()
+            for v, u in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)):
+                if 0 <= v < h and 0 <= u < w and mask[v, u] and not reached[v, u]:
+                    reached[v, u] = True
+                    queue.append((v, u))
+        assert np.array_equal(border_connected(mask), reached)

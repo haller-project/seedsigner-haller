@@ -1,16 +1,34 @@
 """
-    Optional C implementation of the word network, of the dictionary decoding
-    and of the flood fill used to find the card (handwriting.c), built by
-    running `make` in this directory. Without the shared library, the numpy
-    implementation gives the same network output and word scores within about
-    2e-3, and the same flood fill.
+    C library of the handwriting reader (handwriting.c): word network,
+    dictionary decoding and the flood fill used to find the card. It is the
+    only implementation of these steps. SeedSigner OS cross-compiles it with
+    the image; elsewhere, run `make` in this directory.
+
+    This module does not use numpy: the reference vectors are checked with it
+    alone (tests/test_handwriting_vectors.py).
 """
 import ctypes
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 LIBRARY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libhandwriting.so")
 
+# Output classes of the word network: 0 is the CTC blank, then the letters and the digits
+ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+NUM_CLASSES = 1 + len(ALPHABET)
+FIRST_DIGIT_CLASS = 1 + ALPHABET.index("0")
+
+# Layers of the word network with int16 weights, int32 biases and requantization multipliers
+LAYERS = ("b1", "b2", "b3", "b4", "t1", "t2")
+
 _library = []
+
+
+
+class LibraryNotBuilt(RuntimeError):
+    pass
 
 
 
@@ -31,33 +49,79 @@ class Trie(ctypes.Structure):
 
 
 
-def load() -> ctypes.CDLL | None:
+def load() -> ctypes.CDLL:
     """
-        The shared library, or None if it has not been built or cannot be loaded.
+        The shared library, loaded once. Raises LibraryNotBuilt if it has not
+        been built.
     """
     if not _library:
         try:
             lib = ctypes.CDLL(LIBRARY_PATH)
-        except OSError:
-            lib = None
-        if lib is not None:
-            lib.hw_init.restype = None
-            lib.hw_init.argtypes = []
-            lib.hw_init()
-            lib.hw_network_work_size.restype = ctypes.c_size_t
-            lib.hw_network_work_size.argtypes = [ctypes.POINTER(Network), ctypes.c_int]
-            lib.hw_network_logits.restype = ctypes.c_int
-            lib.hw_network_logits.argtypes = [ctypes.POINTER(Network), ctypes.c_void_p, ctypes.c_int,
-                                              ctypes.c_void_p, ctypes.c_void_p]
-            lib.hw_log_softmax.restype = None
-            lib.hw_log_softmax.argtypes = [ctypes.c_void_p, ctypes.c_int]
-            lib.hw_decoder_work_size.restype = ctypes.c_size_t
-            lib.hw_decoder_work_size.argtypes = [ctypes.POINTER(Trie)]
-            lib.hw_word_scores.restype = None
-            lib.hw_word_scores.argtypes = [ctypes.POINTER(Trie), ctypes.c_void_p, ctypes.c_int, ctypes.c_float,
-                                           ctypes.c_void_p, ctypes.c_void_p]
-            lib.hw_border_connected.restype = None
-            lib.hw_border_connected.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
-                                                ctypes.c_void_p]
+        except OSError as e:
+            message = f"Handwriting library not loaded ({e}): run make in {os.path.dirname(LIBRARY_PATH)}"
+            logger.error(message)
+            raise LibraryNotBuilt(message) from e
+        lib.hw_init.restype = None
+        lib.hw_init.argtypes = []
+        lib.hw_init()
+        lib.hw_network_work_size.restype = ctypes.c_size_t
+        lib.hw_network_work_size.argtypes = [ctypes.POINTER(Network), ctypes.c_int]
+        lib.hw_network_logits.restype = ctypes.c_int
+        lib.hw_network_logits.argtypes = [ctypes.POINTER(Network), ctypes.c_void_p, ctypes.c_int,
+                                          ctypes.c_void_p, ctypes.c_void_p]
+        lib.hw_log_softmax.restype = None
+        lib.hw_log_softmax.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        lib.hw_decoder_work_size.restype = ctypes.c_size_t
+        lib.hw_decoder_work_size.argtypes = [ctypes.POINTER(Trie)]
+        lib.hw_word_scores.restype = None
+        lib.hw_word_scores.argtypes = [ctypes.POINTER(Trie), ctypes.c_void_p, ctypes.c_int, ctypes.c_float,
+                                       ctypes.c_void_p, ctypes.c_void_p]
+        lib.hw_border_connected.restype = None
+        lib.hw_border_connected.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+                                            ctypes.c_void_p]
         _library.append(lib)
     return _library[0]
+
+
+
+def address(buffer) -> int:
+    """
+        Address of a writable C-contiguous buffer (numpy array, bytearray, ctypes array).
+    """
+    view = memoryview(buffer).cast("B")
+    return ctypes.addressof(ctypes.c_char.from_buffer(view)) if view.nbytes else 0
+
+
+
+def network(arrays: dict) -> Network:
+    """
+        Network structure pointing to the weight arrays (name -> writable
+        buffer in the layout of handwriting.h, as written by haller.quantize),
+        which it keeps referenced.
+    """
+    count = lambda name: memoryview(arrays[name]).nbytes // 4  # int32 biases: one per output channel
+    net = Network(count("b1.bias"), count("b2.bias"), count("b3.bias"), count("t1.bias"))
+    for i, layer in enumerate(LAYERS):
+        net.w[i], net.b[i], net.m[i] = (address(arrays[layer + k]) for k in (".weight", ".bias", ".mul"))
+    net.wo, net.so, net.bo = (address(arrays[k]) for k in ("out.weight", "out.scale", "out.bias"))
+    net.arrays = arrays
+    return net
+
+
+
+def trie(words: list[str]) -> Trie:
+    """
+        Prefix tree of `words` (letters of ALPHABET), nodes stored parent before
+        child, node 0 being the root.
+    """
+    index = {"": 0}
+    parent, letter = [0], [0]
+    for prefix in sorted({w[:i] for w in words for i in range(1, len(w) + 1)}, key=lambda s: (len(s), s)):
+        index[prefix] = len(parent)
+        parent.append(index[prefix[:-1]])
+        letter.append(ALPHABET.index(prefix[-1]) + 1)
+    arrays = ((ctypes.c_int32 * len(parent))(*parent), (ctypes.c_int16 * len(letter))(*letter),
+              (ctypes.c_int32 * len(words))(*(index[w] for w in words)))
+    t = Trie(len(parent), len(words), *(ctypes.addressof(a) for a in arrays))
+    t.arrays = arrays
+    return t

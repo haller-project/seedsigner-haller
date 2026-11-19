@@ -163,8 +163,8 @@ reaches the edge of the photo, the user is asked to move the camera back
 
 On a Raspberry Pi Zero, with the C library: about 3.5 seconds to load the
 models (once), 5 seconds for a 12-word card, 9 to 12 seconds for a 12-word
-list; 12 to 15 seconds for a 12-word list in lowercase or cursive (second
-reading).
+list; 11 to 16 seconds for a 12-word list in lowercase or cursive (second
+readings).
 
 
 ## The model

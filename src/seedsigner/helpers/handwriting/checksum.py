@@ -81,10 +81,12 @@ class Analysis:
             probabilities of its words; 0 if invalid)
         uncertain: {position: [other possible words]}
     """
-    def __init__(self, readings: list[list[tuple[str, float]]]):
+    def __init__(self, readings: list[list[tuple[str, float]]], min_seed_probability: float = MIN_SEED_PROBABILITY):
         """
             readings: for each position, (word, score) pairs, scores being
             log-likelihoods; a single pair for a word confirmed by the user.
+            min_seed_probability: minimum probability of a seed declared valid
+            without uncertain word.
         """
         self.readings = [dict(zip([w for w, _ in r], probabilities([s for _, s in r]))) for r in readings]
         best = [max(p, key=p.get) for p in self.readings]
@@ -107,7 +109,7 @@ class Analysis:
         self.confidence = math.exp(valid[0][0])
         if self.confidence < MIN_PLAUSIBLE_SEED:
             self._mark_all()
-        elif not self.uncertain and self.confidence < MIN_SEED_PROBABILITY:
+        elif not self.uncertain and self.confidence < min_seed_probability:
             word_p = [p[w] for p, w in zip(self.readings, self.mnemonic)]
             weak = [k for k, q in enumerate(word_p) if q < MIN_CONFIDENT_WORD] or [word_p.index(min(word_p))]
             for k in weak:

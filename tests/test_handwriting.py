@@ -86,3 +86,17 @@ def test_analysis_improbable_seed_marks_every_word():
     analysis = Analysis(confirmed)
     assert analysis.confidence > checksum.MIN_PLAUSIBLE_SEED
     assert set(analysis.uncertain) <= {10, 11}
+
+
+
+def test_analysis_min_seed_probability():
+    """
+        A seed of probability 0.7 is valid with the default minimum (0.5) and
+        gets uncertain words with a minimum of 0.85, as for the second model.
+    """
+    readings = [[(w, 0.0)] for w in VALID_12[:-1]] + [[(VALID_12[-1], 0.0), ("zoo", -1.0)]]
+    assert 0.5 < Analysis(readings).confidence < 0.85
+    assert Analysis(readings).status == "valid"
+    strict = Analysis(readings, min_seed_probability=0.85)
+    assert strict.status == "uncertain"
+    assert list(strict.uncertain) == [11]

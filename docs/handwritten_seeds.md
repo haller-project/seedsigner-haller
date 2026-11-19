@@ -167,9 +167,16 @@ the maximum width), and for each one the output of the C library: SHA-256 of
 the network logits, SHA-256 of the scores of the 2,048 BIP39 words, and the 5
 best words with their scores. `tests/test_handwriting_vectors.py` checks that
 the library gives the same bits, with ctypes alone (no numpy), so it runs in
-SeedSigner's CI, which builds the library first. It was also run on a Pi Zero
-with the library cross-compiled by SeedSigner OS (SMLAD) and with
+SeedSigner's CI, which builds the library first. It also passes on ARMv6
+(arm1176 emulated by QEMU, Raspberry Pi OS userland) with the library
+cross-compiled by SeedSigner OS's toolchain, with SMLAD and with
 `-DHW_GENERIC`.
+
+Bit-identical results across platforms rely on integer arithmetic in the
+network, on IEEE single precision without contraction (`-ffp-contract=off`)
+elsewhere, and on a constant table for the log-add of the decoder:
+`log1pf`/`expf` of glibc differ in the last bit between x86-64 and armhf on
+12 of its 1,025 values. Only the log-softmax calls `libm` (`expf`, `logf`).
 
 Haller also checks, when it writes the vectors, that the quantized C model
 reads them as the float model it comes from (PyTorch): see the Haller

@@ -3,8 +3,7 @@
  * flood fill used to find the seed card on the photo.
  *
  * Pure C99, no allocation: the caller provides the work buffers, whose sizes
- * are given by hw_network_work_size() and hw_decoder_work_size(). hw_init()
- * must be called once before any other function.
+ * are given by hw_network_work_size() and hw_decoder_work_size().
  */
 #ifndef HANDWRITING_H
 #define HANDWRITING_H
@@ -45,9 +44,6 @@ typedef struct {
     const int16_t *letter;   /* nodes */
     const int32_t *word_end; /* words: node of the last letter of each word */
 } hw_trie;
-
-/* Fills the constant tables. */
-void hw_init(void);
 
 /* Number of output frames for an ink map of the given width. */
 int hw_frames(int width);

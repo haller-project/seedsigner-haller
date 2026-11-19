@@ -61,9 +61,6 @@ def load() -> ctypes.CDLL:
             message = f"Handwriting library not loaded ({e}): run make in {os.path.dirname(LIBRARY_PATH)}"
             logger.error(message)
             raise LibraryNotBuilt(message) from e
-        lib.hw_init.restype = None
-        lib.hw_init.argtypes = []
-        lib.hw_init()
         lib.hw_network_work_size.restype = ctypes.c_size_t
         lib.hw_network_work_size.argtypes = [ctypes.POINTER(Network), ctypes.c_int]
         lib.hw_network_logits.restype = ctypes.c_int

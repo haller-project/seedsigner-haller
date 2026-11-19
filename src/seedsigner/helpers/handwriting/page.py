@@ -78,7 +78,7 @@ COLUMN_CORRIDORS = (1.5, 1.0)  # empty width between two columns, in line height
 # whole search on a list (8 card masks tried in vain); the card is faster.
 CARD_MASK_COST = 0.12
 CARD_LINES_COST = 0.15
-RECTIFY_COSTS = (0.6, 1.0)   # transform, then printed lines erased
+RECTIFY_COSTS = (0.6, 1.0)   # transform, then printed lines erased (all of them)
 INK_MASK_COST = 0.85
 PAGE_ANGLE_COST = 0.45
 ROTATION_COST = 0.6
@@ -520,8 +520,8 @@ def card_layout(photo: Image.Image, quad: list, kind: str, step=no_step) -> Word
             for x0, x1, y in lines:
                 ys.append(adjust_line(darkness, x0, x1, y))
                 erase_line(a, darkness, background, x0 - 4, x1 + 6, ys[-1])
+                step(RECTIFY_COSTS[1] / len(lines))
             page.extend([Image.fromarray(np.clip(a, 0, 255).astype(np.uint8)), ys])
-            step(RECTIFY_COSTS[1])
         return page
 
     def box(k, variant):

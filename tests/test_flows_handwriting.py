@@ -361,11 +361,11 @@ class TestHandwrittenScanScreen(HandwrittenScreenTestBase):
 
 class TestHandwrittenReadingScreen(HandwrittenScreenTestBase):
 
-    def run_screen(self, read_function, style: str = "sheet"):
+    def run_screen(self, read_function):
         from seedsigner.gui.screens.handwritten_screens import HandwrittenReadingScreen
 
         with self.renderer_patch:
-            screen = HandwrittenReadingScreen(read_function=read_function, style=style)
+            screen = HandwrittenReadingScreen(read_function=read_function)
             screen.reading_thread.start()
             return screen, screen._run()
 
@@ -386,29 +386,34 @@ class TestHandwrittenReadingScreen(HandwrittenScreenTestBase):
         assert screen.fraction == 1.0
 
 
-    @pytest.mark.parametrize("style", ["sheet", "word", "list"])
-    def test_photo_and_words_shown(self, style: str):
+    def test_photo_and_words_shown(self):
         """
-        The photo, then each word read, are prepared by the reading thread and drawn
-        within the screen.
+        The photo, then the area of the words with each word read outlined, are prepared
+        by the reading thread and drawn within the screen.
         """
         layout = MagicMock(count=12)
         layout.outline.side_effect = lambda k: [(100, 200 + 100 * k), (900, 200 + 100 * k), (900, 280 + 100 * k), (100, 280 + 100 * k)]
+        shown = []
 
         def read_function(screen):
             screen.show_photo(Image.new("L", (1944, 2592), 200))
             screen._render_reading()
+            shown.append(screen.image.size)
             for k in range(12):
-                screen.show_word(layout, k, MagicMock(image=Image.new("L", (800, 80), 230), candidates=[("abandon", 0.0)]))
+                screen.show_word(layout, k, MagicMock(candidates=[("abandon", 0.0)]))
                 screen._render_reading()
             return screen
 
-        screen, _ = self.run_screen(read_function, style)
+        screen, _ = self.run_screen(read_function)
 
-        assert screen.words == ["abandon"] * 12 and screen.word == (11, 12, "abandon")
-        if screen.image is not None:
-            left, top, right, bottom = screen.area
-            assert screen.image.width <= right - left and screen.image.height <= bottom - top
+        left, top, right, bottom = screen.area
+        assert shown[0][0] <= right - left and shown[0][1] <= bottom - top
+        assert screen.word == (11, 12, "abandon")
+        assert screen.image.width <= right - left - screen.TEXT_WIDTH and screen.image.height <= bottom - top
+        # The word being read is outlined in the accent color
+        from PIL import ImageColor
+        from seedsigner.gui.components import GUIConstants
+        assert ImageColor.getrgb(GUIConstants.ACCENT_COLOR) in screen.image.getdata()
 
 
     def test_reraises_reading_error(self):

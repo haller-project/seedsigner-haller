@@ -107,25 +107,22 @@ class HandwrittenScanScreen(BaseScreen):
 class HandwrittenReadingScreen(BaseTopNavScreen):
     """
     Runs `read_function(screen)` in a background thread, which reports to the screen
-    the photo (`show_photo`), the words read (`show_word`) and the progress
-    (`report_progress`). The images displayed are prepared by the reading thread; the
-    screen is redrawn at most every RENDER_INTERVAL seconds (each redraw costs the
-    reading about 15ms of processor time on a Pi Zero).
+    the photo (`show_photo`), each word read (`show_word`) and the progress
+    (`report_progress`). The photo is shown while the words are searched, then the
+    area of the words with the word being read outlined, next to that word.
 
-    `style`: what is shown above the progress bar once the words are found:
-    * "sheet": the photo, with the word being read outlined, and that word;
-    * "word": the photographed word being read, and that word;
-    * "list": the words read so far.
+    The images are prepared by the reading thread, and the screen is redrawn at most
+    every RENDER_INTERVAL seconds: a redraw costs the reading about 11ms of processor
+    time on a Pi Zero.
 
     Returns the value returned by `read_function`; re-raises the exception it raised.
     """
     title: str = _mft("Reading words")
     show_back_button: bool = False
     read_function: Callable = None
-    style: str = "sheet"
 
     RENDER_INTERVAL = 0.4
-    TEXT_WIDTH = 100            # width left for the word read, right of the sheet
+    TEXT_WIDTH = 100            # width left for the word read, right of the words area
     BAR_HEIGHT = 8
 
 
@@ -134,9 +131,8 @@ class HandwrittenReadingScreen(BaseTopNavScreen):
         self.fraction = 0.0
         self.photo = None       # the photo, while the words are being read
         self.sheet = None       # (thumbnail of the words area, its origin and scale on the photo)
-        self.image = None       # image shown above the bar, prepared by the reading thread
+        self.image = None       # image shown above the bar
         self.word = None        # (index, count, text) of the last word read
-        self.words = []
         self.version = 0        # incremented by the reading thread on each change
 
         self.bar_top = self.canvas_height - GUIConstants.EDGE_PADDING - self.BAR_HEIGHT
@@ -149,20 +145,6 @@ class HandwrittenReadingScreen(BaseTopNavScreen):
         self.threads.append(self.reading_thread)
 
 
-    def report_progress(self, fraction: float):
-        """ Called from the reading thread; the screen redraws on its next loop """
-        self.fraction = min(max(fraction, 0.0), 1.0)
-        self.version += 1
-
-
-    def show_photo(self, photo: Image.Image):
-        """ Called from the reading thread with the photo, shown while the words are searched """
-        left, top, right, bottom = self.area
-        self.photo = photo
-        self.image = self.thumbnail(photo, right - left, bottom - top)
-        self.version += 1
-
-
     @staticmethod
     def thumbnail(image: Image.Image, width: int, height: int) -> Image.Image:
         """ `image` reduced to fit in width x height, in RGB """
@@ -170,39 +152,40 @@ class HandwrittenReadingScreen(BaseTopNavScreen):
         return image.reduce(factor).convert("RGB")
 
 
+    def report_progress(self, fraction: float):
+        """ Called from the reading thread; the screen redraws on its next loop """
+        self.fraction = min(max(fraction, 0.0), 1.0)
+        self.version += 1
+
+
+    def show_photo(self, photo: Image.Image):
+        """ Called from the reading thread with the upright photo, before the reading """
+        left, top, right, bottom = self.area
+        self.photo = photo
+        self.image = self.thumbnail(photo, right - left, bottom - top)
+        self.version += 1
+
+
     def show_word(self, layout, k: int, reading):
         """ Called from the reading thread after the first reading of each word """
-        text = reading.candidates[0][0]
-        if self.style == "sheet" and self.photo:
-            if k == 0:
-                # Thumbnail of the area of the words, next to the text of the word read
-                corners = [p for i in range(layout.count) for p in layout.outline(i)]
-                x0, y0 = min(x for x, _ in corners), min(y for _, y in corners)
-                x1, y1 = max(x for x, _ in corners), max(y for _, y in corners)
-                margin = 0.05 * max(x1 - x0, y1 - y0)
-                box = tuple(int(v) for v in (max(0, x0 - margin), max(0, y0 - margin),
-                                             min(self.photo.width, x1 + margin), min(self.photo.height, y1 + margin)))
-                left, top, right, bottom = self.area
-                thumbnail = self.thumbnail(self.photo.crop(box), right - left - self.TEXT_WIDTH, bottom - top)
-                self.sheet = (thumbnail, box[:2], thumbnail.width / (box[2] - box[0]))
-            thumbnail, (x0, y0), scale = self.sheet
-            image = thumbnail.copy()
-            ImageDraw.Draw(image).polygon([((x - x0) * scale, (y - y0) * scale) for x, y in layout.outline(k)],
-                                          outline=GUIConstants.ACCENT_COLOR, width=2)
-            self.image = image
-        elif self.style == "word":
-            left, top, right, bottom = self.area
-            word = reading.image
-            factor = max(1, int(min(word.width / (right - left), word.height / ((bottom - top) / 2))))
-            word = word.reduce(factor)
-            scale = min((right - left) / word.width, (bottom - top) / 2 / word.height)
-            self.image = word.resize((max(1, int(word.width * scale)), max(1, int(word.height * scale)))).convert("RGB")
-        else:
-            self.image = None
         if k == 0:
-            self.words = [None] * layout.count
-        self.words[k] = text
-        self.word = (k, layout.count, text)
+            # Thumbnail of the area of the words, with a margin
+            corners = [p for i in range(layout.count) for p in layout.outline(i)]
+            x0, y0 = min(x for x, _ in corners), min(y for _, y in corners)
+            x1, y1 = max(x for x, _ in corners), max(y for _, y in corners)
+            margin = 0.05 * max(x1 - x0, y1 - y0)
+            box = tuple(int(v) for v in (max(0, x0 - margin), max(0, y0 - margin),
+                                         min(self.photo.width, x1 + margin), min(self.photo.height, y1 + margin)))
+            left, top, right, bottom = self.area
+            thumbnail = self.thumbnail(self.photo.crop(box), right - left - self.TEXT_WIDTH, bottom - top)
+            self.sheet = (thumbnail, box[:2], thumbnail.width / (box[2] - box[0]))
+
+        thumbnail, (x0, y0), scale = self.sheet
+        image = thumbnail.copy()
+        ImageDraw.Draw(image).polygon([((x - x0) * scale, (y - y0) * scale) for x, y in layout.outline(k)],
+                                      outline=GUIConstants.ACCENT_COLOR, width=2)
+        self.image = image
+        self.word = (k, layout.count, reading.candidates[0][0])
         self.version += 1
 
 
@@ -216,62 +199,23 @@ class HandwrittenReadingScreen(BaseTopNavScreen):
         draw.rectangle((0, self.top_nav.height, self.canvas_width, self.canvas_height), fill=GUIConstants.BACKGROUND_COLOR)
         left, top, right, bottom = self.area
 
-        if self.word is not None and self.style == "list":
-            self._render_list()
-        elif self.word is not None and self.style == "word":
-            image = self.image
-            y = top + int((bottom - top - image.height - 2 * GUIConstants.COMPONENT_PADDING
-                           - GUIConstants.LABEL_FONT_SIZE - self.word_font.size) / 2)
-            self.renderer.canvas.paste(image, (int((left + right - image.width) / 2), y))
-            self._render_word(int((left + right) / 2), y + image.height + GUIConstants.COMPONENT_PADDING, "mt")
-        elif self.image is not None:
-            image = self.image
-            if self.word is None:
-                x = int((left + right - image.width) / 2)
-            else:
-                x = left
-                self._render_word(int((x + image.width + right) / 2), int((top + bottom) / 2), "mm")
-            self.renderer.canvas.paste(image, (x, top + int((bottom - top - image.height) / 2)))
+        if self.image is not None:
+            x = left if self.word else int((left + right - self.image.width) / 2)
+            self.renderer.canvas.paste(self.image, (x, top + int((bottom - top - self.image.height) / 2)))
+
+        if self.word is not None:
+            # Number and text of the word, right of the words area
+            k, count, text = self.word
+            x, y = int((left + self.image.width + right) / 2), int((top + bottom) / 2)
+            draw.text((x, y - GUIConstants.LIST_ITEM_PADDING), f"{k + 1}/{count}", fill=GUIConstants.LABEL_FONT_COLOR,
+                      font=self.label_font, anchor="mb")
+            draw.text((x, y + GUIConstants.LIST_ITEM_PADDING), text, fill=GUIConstants.BODY_FONT_COLOR,
+                      font=self.word_font, anchor="mt")
 
         # Progress bar
         draw.rectangle((left, self.bar_top, right, self.bar_top + self.BAR_HEIGHT), outline=GUIConstants.INACTIVE_COLOR)
         draw.rectangle((left, self.bar_top, left + int((right - left) * self.fraction), self.bar_top + self.BAR_HEIGHT),
                        fill=GUIConstants.ACCENT_COLOR)
-
-
-    def _render_word(self, x: int, y: int, anchor: str):
-        """ Number and text of the last word read, centered on x """
-        k, count, text = self.word
-        draw = self.renderer.draw
-        label_height = GUIConstants.LABEL_FONT_SIZE + GUIConstants.COMPONENT_PADDING
-        if anchor == "mm":
-            y -= int(label_height / 2)
-        draw.text((x, y - (label_height if anchor == "mm" else 0)), f"{k + 1}/{count}", fill=GUIConstants.LABEL_FONT_COLOR,
-                  font=self.label_font, anchor="mt" if anchor == "mt" else "mm")
-        draw.text((x, y + (label_height if anchor == "mt" else 0)), text, fill=GUIConstants.BODY_FONT_COLOR,
-                  font=self.word_font, anchor=anchor)
-
-
-    def _render_list(self):
-        """ The words read so far, numbered, in two columns; the last one highlighted """
-        left, top, right, bottom = self.area
-        rows = -(-len(self.words) // 2)
-        row_height = (bottom - top) / rows
-        size = min(22, int(row_height * 0.9))
-        while True:
-            font = Fonts.get_font(GUIConstants.FIXED_WIDTH_EMPHASIS_FONT_NAME, size)
-            # "24 abandon " fits in a column: BIP39 words have at most 8 letters
-            if font.getlength("00 abcdefgh ") <= (right - left) / 2 or size <= 10:
-                break
-            size -= 1
-        draw = self.renderer.draw
-        for k, text in enumerate(self.words):
-            x = left + (k // rows) * int((right - left) / 2)
-            y = top + int((k % rows + 0.5) * row_height)
-            color = GUIConstants.ACCENT_COLOR if k == self.word[0] else GUIConstants.BODY_FONT_COLOR
-            draw.text((x, y), f"{k + 1:>2} ", fill=GUIConstants.LABEL_FONT_COLOR, font=font, anchor="lm")
-            if text:
-                draw.text((x + font.getlength("00 "), y), text, fill=color, font=font, anchor="lm")
 
 
     def _run(self):

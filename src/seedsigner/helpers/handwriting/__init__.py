@@ -53,6 +53,15 @@ MIN_WORD_SCORE = -1e4
 
 FIRST, LOWERCASE, BLEND = (1.0, 0.0), (0.0, 1.0), (BLEND_WEIGHT, 1 - BLEND_WEIGHT)
 
+# Word scores of each network, and of the blend, are divided by a temperature
+# so that they can be used as calibrated log-likelihoods by checksum.Analysis.
+# Chosen on 640 simulated pages kept apart from the test photos (EMNIST test
+# capitals, two lowercase fonts never used elsewhere): the lowest temperature
+# with no wrong seed declared valid; the probability of the first word then
+# matches its accuracy within 1 % on capitals (2.6 would fit capitals best,
+# 1.7 cards and cursive).
+TEMPERATURES = {FIRST: 2.2, LOWERCASE: 2.2, BLEND: 2.2}
+
 # Expected duration of the steps of a reading, in seconds on a Pi Zero (see
 # Progress): loading of the models, reading of a word by the first network
 # (crop, normalization, network, decoder), by the second network or the blend
@@ -99,11 +108,16 @@ class SeedReading:
         kind: "card12", "card24" or "list"
         words: one WordReading per position
         min_seed_probability: see checksum.Analysis
+        complete: False if text was left out of the crops, so that the number
+            of words is uncertain: no word is then certain unless confirmed
     """
-    def __init__(self, kind: str, words: list[WordReading], min_seed_probability: float = MIN_SEED_PROBABILITY):
+    def __init__(self, kind: str, words: list[WordReading], min_seed_probability: float = MIN_SEED_PROBABILITY,
+                 complete: bool = True):
         self.kind = kind
         self.words = words
         self.min_seed_probability = min_seed_probability
+        self.complete = complete
+        self.doubtful = set() if complete else set(range(len(words)))
         self._last = None
 
 
@@ -117,7 +131,7 @@ class SeedReading:
         readings = [[(confirmed[k], 0.0)] if k in confirmed else w.candidates for k, w in enumerate(self.words)]
         if self._last is None or self._last[0] != confirmed or len(self._last[1]) != len(readings) \
                 or any(a is not b for a, b in zip(self._last[1], readings)):
-            self._last = (confirmed, readings, Analysis(readings, self.min_seed_probability))
+            self._last = (confirmed, readings, Analysis(readings, self.min_seed_probability, self.doubtful))
         return self._last[2]
 
 
@@ -234,6 +248,7 @@ class LayoutReader:
         else:
             scores = weights[0] * log_softmax(self.model_scores(k, variant, 0)) \
                 + weights[1] * log_softmax(self.model_scores(k, variant, 1))
+        scores = scores / TEMPERATURES[weights]
         best = np.argsort(-scores, kind="stable")[:CANDIDATES]
         return WordReading(crop, [(words[i], float(scores[i])) for i in best])
 
@@ -263,12 +278,16 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
     """
     layout = reader.layout
     words = []
+
+    def seed_reading(order):
+        return SeedReading(layout.kind, [words[k] for k in order], min_seed_probability, layout.complete)
+
     for k in range(layout.count):
         words.append(reader.read(k, 0, weights))
         progress.step(WORD_COST if weights == FIRST else OTHER_WORD_COST)
         if on_word:
             on_word(layout, k, words[-1])
-    reading = SeedReading(layout.kind, words, min_seed_probability)
+    reading = seed_reading(range(layout.count))
 
     # Re-reads of the least probable words, on their other crops
     if layout.variants > 1:
@@ -281,13 +300,13 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
             if others:
                 best = max((r.candidates for r in others), key=top_probability)
                 words[k] = WordReading(words[k].image, combine(words[k].candidates, best))
-                reading = SeedReading(layout.kind, words, min_seed_probability)
+                reading = seed_reading(range(layout.count))
 
     # Two columns of equal length: column by column, or row by row if only
     # that order gives a valid seed
     for order in layout.orders[1:]:
         if reading.analyze().status == "invalid":
-            alternative = SeedReading(layout.kind, [words[i] for i in order], min_seed_probability)
+            alternative = seed_reading(order)
             if alternative.analyze().status != "invalid":
                 reading = alternative
     return reading

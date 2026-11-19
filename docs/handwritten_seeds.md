@@ -57,17 +57,40 @@ The engine is `seedsigner.helpers.handwriting`:
 
 | Module | Role |
 |---|---|
-| `page.py` | finds the card (corners, rectification, known line positions) or the lines and columns of a list (rotation, line profiles, word numbers), and cuts out one crop per word |
+| `page.py` | finds the card (corners, rectification, known line positions) or the lines and columns of a list (rotation, line profiles, word numbers), and cuts out one crop per word; a line box is widened while ink lies just beyond its sides (a letter set apart from the rest of the word, a faint stroke) |
 | `preprocess.py` | turns a word crop into an ink map 32 pixels high |
 | `word_model.py` | small convolutional network (about 160 000 parameters, CTC), run in 16-bit integers; two sets of weights, see [The Haller-1 model](#the-haller-1-model) |
 | `decoder.py` | log-likelihood of each of the 2 048 BIP39 words (prefix tree, beam pruning); a line number before the word is accepted |
-| `checksum.py` | combinations of plausible words, BIP39 checksum, confidence, uncertain words |
+| `checksum.py` | combinations of plausible words, BIP39 checksum, probability of the seed and of each word given the checksum, uncertain words |
 | `native/handwriting.c` | network, decoder and the flood fill of the card search in portable C (no allocation, no CPython), used through `ctypes`; required, see [C library](#c-library) |
 
 There is no letter segmentation: the network reads the whole word, and the
 dictionary decoding only ever returns BIP39 words. The checksum then rules out
-most wrong combinations; a seed is reported as valid only when no other valid
-seed is nearly as probable and every word is read with high probability.
+most wrong combinations; a seed is reported as valid only when every word has a
+probability of at least 0.95 given the photo and the checksum.
+
+### Calibration
+
+The word scores of the decoder are divided by a temperature (2.2, for each
+network and for the blend) to serve as log-likelihoods. The analysis then
+computes the probability of each valid seed given the photo and the checksum:
+its reading probability divided by that of all the valid seeds, the ones
+enumerated and the share of the combinations left out that passes the
+checksum by chance (1 in 16 for 12 words). The probability of a word is
+the sum over the valid seeds that contain it. This is the percentage shown
+next to each proposed word when the user reviews an uncertain word.
+
+The temperature and the thresholds were chosen on 640 simulated pages kept
+apart from the test photos (EMNIST test capitals and two lowercase fonts
+never used elsewhere): the lowest temperature with no wrong seed reported as
+valid (at 1.3 and 1.8, two wrong seeds pass), then the threshold on the words.
+On the 1,605 test photos, a word shown at 15 % is right 8 % of the time, at
+45 % 52 %, at 75 % 82 %, at 86 % 89 % (expected calibration error 0.005; 0.020
+on cursive); before this calibration, words shown at 15 to 35 % were right
+16 to 23 % of the time, and seeds given 15 to 35 % were right 70 to 75 % of the
+time (calibration error of the seed probability 0.070, now 0.016). One
+temperature fits all writings only approximately: capitals alone would take
+2.6, cards and cursive about 1.7.
 
 The two networks of Haller-1, of the same size, read the words. The first
 one reads every photo. When its seed is not valid, the photo is read again by
@@ -80,11 +103,19 @@ a more probable seed). A seed of the second network alone needs a probability
 of 0.85 instead of 0.5 to be reported as valid without uncertain words: it
 reads the photos the first one failed on, where a wrong combination passes
 the checksum more often. The blend, which corrects most of these chance
-agreements, keeps the threshold of 0.5.
+agreements, keeps the threshold of 0.5. Since every word must reach 0.95, these
+thresholds on the seed seldom decide.
 
 When the seed is invalid, or valid but improbable (probability below 0.1), a
 misread word can be read with high probability of its own while the checksum
 is passed by chance by the other words: every word is then marked uncertain.
+So it is when text is left out of the crops of a list (a missed line, two
+columns read as one): the number of words is then uncertain.
+
+On a blurred photo of a card, the printed lines are spread out and lighter;
+when no card candidate shows half of its lines, they are looked for again
+with a lower contrast (3 gray levels instead of 6), which never turns a list
+of the test photos into a card.
 
 `read_seed(image, progress, on_word)` reports its progress after every step
 of the page search and of the reading. Each step is weighted by its expected
@@ -270,8 +301,8 @@ described in [How it works](#how-it-works):
 
 | Weights (`src/seedsigner/resources/handwriting/`) | Role | SHA-256 |
 |---|---|---|
-| `haller-1-capitals.npz` | reads every photo; trained mostly on capitals | `1faede0402e7e3b48e922f8a82a3d72fcbb7e7354b4909298e31616431e7206a` |
-| `haller-1-lowercase.npz` | second reading; more lowercase and cursive writing | `55c2aba311f7e31e4fdbe6e82d17fc820165064c23c1792e1059fa6bf4e3863f` |
+| `haller-1-capitals.npz` | reads every photo; trained mostly on capitals | `2e9275f1acd0d347437e856160430e96a283ec484a48ab96a2ea1ca91531fe14` |
+| `haller-1-lowercase.npz` | second reading; more lowercase and cursive writing | `5d340b354ced032992cb474f03bcc0b063f24ee8e1446d2953203b778652e509` |
 
 They are produced, from scratch and reproducibly, by the separate
 [Haller](https://github.com/pizza-bitcoiner/haller) repository (tag

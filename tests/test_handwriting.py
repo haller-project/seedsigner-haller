@@ -1,3 +1,6 @@
+import math
+
+import pytest
 from embit import bip39
 
 from seedsigner.helpers.handwriting import checksum
@@ -38,14 +41,34 @@ def test_analysis_valid():
 def test_analysis_checksum_fixes_a_word():
     """
         The best reading of a word fails the checksum; the second one passes:
-        the seed is valid but that word is uncertain.
+        the seed is chosen, but that word is uncertain since the photo read
+        another word. Given the checksum, the word chosen is certain and the
+        word read impossible: the options say so.
     """
     readings = [[(w, 0.0)] for w in VALID_12[:-1]] + [[("able", 0.0), (VALID_12[-1], -1.0)]]
     analysis = Analysis(readings)
     assert analysis.mnemonic == VALID_12
     assert analysis.status == "uncertain"
     assert list(analysis.uncertain) == [11]
-    assert analysis.options(11)[0][0] == "able"
+    assert analysis.options(11) == [(VALID_12[-1], 1.0), ("able", 0.0)]
+
+
+
+def test_analysis_probabilities_given_the_checksum():
+    """
+        Two readings of the last word both pass the checksum: their
+        probabilities given the checksum are their reading probabilities, and
+        the less probable rival makes the word uncertain.
+    """
+    rival = next(w for w in bip39.WORDLIST if w != VALID_12[-1] and checksum.checksum_ok(VALID_12[:-1] + [w]))
+    readings = [[(w, 0.0)] for w in VALID_12[:-1]] + [[(VALID_12[-1], 0.0), (rival, -1.0)]]
+    analysis = Analysis(readings)
+    p = 1 / (1 + math.exp(-1.0))
+    assert analysis.mnemonic == VALID_12
+    assert analysis.confidence == pytest.approx(p)
+    assert analysis.options(11) == [(VALID_12[-1], pytest.approx(p)), (rival, pytest.approx(1 - p))]
+    assert analysis.status == "uncertain"
+    assert list(analysis.uncertain) == [11]
 
 
 
@@ -91,12 +114,20 @@ def test_analysis_improbable_seed_marks_every_word():
 
 def test_analysis_min_seed_probability():
     """
-        A seed of probability 0.7 is valid with the default minimum (0.5) and
-        gets uncertain words with a minimum of 0.85, as for the second model.
+        Every word has a slightly less probable rival that also passes the
+        checksum: each word is above MIN_CONFIDENT_WORD given the checksum, but
+        the seed itself has a probability of about 0.7. It is valid with the
+        default minimum (0.5); with a minimum of 0.85, as for the second model,
+        its least probable word becomes uncertain.
     """
-    readings = [[(w, 0.0)] for w in VALID_12[:-1]] + [[(VALID_12[-1], 0.0), ("zoo", -1.0)]]
-    assert 0.5 < Analysis(readings).confidence < 0.85
-    assert Analysis(readings).status == "valid"
+    rivals = [next(w for w in bip39.WORDLIST
+                   if w != VALID_12[k] and checksum.checksum_ok(VALID_12[:k] + [w] + VALID_12[k + 1:]))
+              for k in range(12)]
+    readings = [[(w, 0.0), (r, -3.3)] for w, r in zip(VALID_12, rivals)]
+    analysis = Analysis(readings)
+    assert 0.5 < analysis.confidence < 0.85
+    assert min(analysis.word_probability(k, w) for k, w in enumerate(VALID_12)) > checksum.MIN_CONFIDENT_WORD
+    assert analysis.status == "valid"
     strict = Analysis(readings, min_seed_probability=0.85)
     assert strict.status == "uncertain"
-    assert list(strict.uncertain) == [11]
+    assert len(strict.uncertain) == 1

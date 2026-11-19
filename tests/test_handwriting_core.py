@@ -64,8 +64,8 @@ def test_perfect_word():
 def test_haller_1_weights():
     """ The shipped weights are those of Haller-1 listed in docs/handwritten_seeds.md. """
     expected = {
-        "haller-1-capitals.npz": "1faede0402e7e3b48e922f8a82a3d72fcbb7e7354b4909298e31616431e7206a",
-        "haller-1-lowercase.npz": "55c2aba311f7e31e4fdbe6e82d17fc820165064c23c1792e1059fa6bf4e3863f",
+        "haller-1-capitals.npz": "2e9275f1acd0d347437e856160430e96a283ec484a48ab96a2ea1ca91531fe14",
+        "haller-1-lowercase.npz": "5d340b354ced032992cb474f03bcc0b063f24ee8e1446d2953203b778652e509",
     }
     for name, sha256 in expected.items():
         with open(os.path.join(os.path.dirname(MODEL_PATH), name), "rb") as f:
@@ -95,7 +95,8 @@ def fake_layout(words: list[str]):
     """ Layout of one column of the given words, one crop variant. """
     crops = [word_crop(w) for w in words]
     return types.SimpleNamespace(kind="list", count=len(words), orders=[list(range(len(words)))], variants=1,
-                                 crop=lambda k, variant=0: crops[k] if variant == 0 else None, alternative=None)
+                                 crop=lambda k, variant=0: crops[k] if variant == 0 else None, alternative=None,
+                                 complete=True)
 
 
 
@@ -127,7 +128,7 @@ def test_blend_reuses_the_scores_of_both_networks(monkeypatch):
     expected = hw.BLEND_WEIGHT * hw.log_softmax(reader.model_scores(0, 0, 0)) \
         + (1 - hw.BLEND_WEIGHT) * hw.log_softmax(reader.model_scores(0, 0, 1))
     assert blend[0][0] == "letter"
-    assert blend[0][1] == pytest.approx(expected.max())
+    assert blend[0][1] == pytest.approx(expected.max() / hw.TEMPERATURES[hw.BLEND])
 
 
 

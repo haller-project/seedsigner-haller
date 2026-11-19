@@ -93,16 +93,21 @@ class SeedReading:
         self.kind = kind
         self.words = words
         self.min_seed_probability = min_seed_probability
+        self._last = None
 
 
     def analyze(self, confirmed: dict[int, str] = None) -> Analysis:
         """
             Seed chosen from the readings, the words confirmed by the user
-            ({position: word}) being fixed.
+            ({position: word}) being fixed. The last analysis is kept: it takes
+            up to 2 seconds on a Pi Zero when the seed is uncertain.
         """
-        confirmed = confirmed or {}
-        return Analysis([[(confirmed[k], 0.0)] if k in confirmed else w.candidates for k, w in enumerate(self.words)],
-                        self.min_seed_probability)
+        confirmed = dict(confirmed or {})
+        readings = [[(confirmed[k], 0.0)] if k in confirmed else w.candidates for k, w in enumerate(self.words)]
+        if self._last is None or self._last[0] != confirmed or len(self._last[1]) != len(readings) \
+                or any(a is not b for a, b in zip(self._last[1], readings)):
+            self._last = (confirmed, readings, Analysis(readings, self.min_seed_probability))
+        return self._last[2]
 
 
 

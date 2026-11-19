@@ -64,11 +64,15 @@ seed is nearly as probable and every word is read with high probability.
 
 Two networks of the same size read the words. The first one reads every
 photo. When its seed is not valid, the photo is read again by the second one,
-trained with more lowercase and cursive writing; its reading is kept if its
-status is better, or as good with a more probable seed. A seed of the second
-network needs a probability of 0.85 instead of 0.5 to be reported as valid
-without uncertain words: it reads the photos the first one failed on, where a
-wrong combination passes the checksum more often.
+trained with more lowercase and cursive writing, then by a blend of both: for
+each word, the weighted sum of the log-probabilities given by the two
+networks (0.65 for the first one), which reuses the scores already computed.
+The most likely of these readings is kept (better status, or same status with
+a more probable seed). A seed of the second network alone needs a probability
+of 0.85 instead of 0.5 to be reported as valid without uncertain words: it
+reads the photos the first one failed on, where a wrong combination passes
+the checksum more often. The blend, which corrects most of these chance
+agreements, keeps the threshold of 0.5.
 
 When the seed is invalid, or valid but improbable (probability below 0.1), a
 misread word can be read with high probability of its own while the checksum
@@ -140,8 +144,8 @@ reported as valid; words read correctly):
 
 | Writing | Photos | Valid and exact | Exact | Wrong valid | Words |
 |---|---|---|---|---|---|
-| Capitals (photos above) | 1295 | 1081 | 1120 | 0 | 86 % |
-| Neat cursive (simulated) | 301 | 84 | 144 | 0 | 69 % |
+| Capitals (photos above) | 1295 | 1083 | 1121 | 0 | 87 % |
+| Neat cursive (simulated) | 301 | 95 | 147 | 0 | 70 % |
 | Real photos, lowercase and cursive | 4 | 0 | 2 | 0 | 41 of 48 |
 
 The simulated cursive pages are written in 13 handwriting fonts (10

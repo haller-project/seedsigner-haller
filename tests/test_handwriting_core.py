@@ -97,3 +97,65 @@ def test_read_rendered_words():
     for word in ("abandon", "zoo", "wrist", "letter"):
         scores = decoder.scores(model.log_probs(ink_map_of(word)))
         assert decoder.words[int(np.argmax(scores))] == word
+
+
+
+def word_crop(text: str) -> Image.Image:
+    """ `text` drawn on a gray background, as cut from a photo. """
+    font = ImageFont.truetype(FONT_PATH, 40)
+    image = Image.new("L", (40 + 26 * len(text), 70), 200)
+    ImageDraw.Draw(image).text((20, 5), text, fill=40, font=font)
+    return image
+
+
+
+def fake_layout(words: list[str]):
+    """ Layout of one column of the given words, one crop variant. """
+    crops = [word_crop(w) for w in words]
+    return types.SimpleNamespace(kind="list", count=len(words), orders=[list(range(len(words)))], variants=1,
+                                 crop=lambda k, variant=0: crops[k] if variant == 0 else None, alternative=None)
+
+
+
+def counting_networks(monkeypatch) -> dict[str, int]:
+    """ Counts the calls to the two networks of the engine. """
+    import seedsigner.helpers.handwriting as hw
+    first, decoder, lowercase = hw.load_engine()
+    calls = {"first": 0, "lowercase": 0}
+    for name, network in (("first", first), ("lowercase", lowercase)):
+        original = network.log_probs
+        def counted(ink, name=name, original=original):
+            calls[name] += 1
+            return original(ink)
+        monkeypatch.setattr(network, "log_probs", counted)
+    return calls
+
+
+
+def test_blend_reuses_the_scores_of_both_networks(monkeypatch):
+    """ A crop is read once per network; the blend is the weighted sum of their log-probabilities. """
+    import seedsigner.helpers.handwriting as hw
+    calls = counting_networks(monkeypatch)
+    reader = hw.LayoutReader(fake_layout(["letter"]))
+    assert reader.read(0, 0, hw.FIRST).candidates[0][0] == "letter"
+    assert reader.read(0, 0, hw.LOWERCASE).candidates[0][0] == "letter"
+    blend = reader.read(0, 0, hw.BLEND).candidates
+    assert calls == {"first": 1, "lowercase": 1}
+    assert reader.read(0, 1, hw.BLEND) is None
+    expected = hw.BLEND_WEIGHT * hw.log_softmax(reader.model_scores(0, 0, 0)) \
+        + (1 - hw.BLEND_WEIGHT) * hw.log_softmax(reader.model_scores(0, 0, 1))
+    assert blend[0][0] == "letter"
+    assert blend[0][1] == pytest.approx(expected.max())
+
+
+
+def test_second_readings_only_when_the_seed_is_not_valid(monkeypatch):
+    """ A valid seed is read by the first network only; an invalid one also by the second network and the blend. """
+    import seedsigner.helpers.handwriting as hw
+    valid = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".split()
+    for words, second in ((valid, 0), (valid[:-1] + ["zoo"], len(valid))):
+        calls = counting_networks(monkeypatch)
+        monkeypatch.setattr(hw, "find_words", lambda image, words=words: fake_layout(words))
+        reading = hw.read_seed(Image.new("L", (10, 10)))
+        assert [w.candidates[0][0] for w in reading.words] == words
+        assert calls == {"first": len(words), "lowercase": second}

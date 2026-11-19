@@ -42,6 +42,16 @@ STATUS_RANK = {"invalid": 0, "uncertain": 1, "valid": 2}
 LOWERCASE_MODEL_PATH = MODEL_PATH.replace("word_model.npz", "word_model_lowercase.npz")
 LOWERCASE_MIN_SEED_PROBABILITY = 0.85
 
+# The same photos are also read with a blend of both networks: weighted sum of
+# their word log-probabilities, BLEND_WEIGHT for the first one. It reuses the
+# scores already computed. Scores of words dropped by the decoder beam are
+# raised to MIN_WORD_SCORE first, so that the weighted sum stays finite.
+BLEND_WEIGHT = 0.65
+BLEND_MIN_SEED_PROBABILITY = 0.5
+MIN_WORD_SCORE = -1e4
+
+FIRST, LOWERCASE, BLEND = (1.0, 0.0), (0.0, 1.0), (BLEND_WEIGHT, 1 - BLEND_WEIGHT)
+
 _engine = []
 _engine_lock = threading.Lock()
 
@@ -104,20 +114,80 @@ def top_probability(candidates: list[tuple[str, float]]) -> float:
 
 
 
-def read_word(image: Image.Image, model=None) -> list[tuple[str, float]]:
+def log_softmax(scores: np.ndarray) -> np.ndarray:
     """
-        The CANDIDATES most likely words written on `image` according to
-        `model` (default: the first word model), with their log-likelihood; if
-        no ink is found, CANDIDATES words with equal scores.
+        Word log-probabilities from word scores.
     """
-    first, decoder, _ = load_engine()
-    model = model or first
-    ink = normalize_word(image)
-    if ink is None:
-        return [(w, 0.0) for w in decoder.words[:CANDIDATES]]
-    scores = decoder.scores(model.log_probs(ink))
-    best = np.argsort(-scores)[:CANDIDATES]
-    return [(decoder.words[i], float(scores[i])) for i in best]
+    scores = np.maximum(scores.astype(np.float64), MIN_WORD_SCORE)
+    top = scores.max()
+    return scores - (top + math.log(np.exp(scores - top).sum()))
+
+
+
+class LayoutReader:
+    """
+        Reads the words of `layout` with either network or their blend; the
+        scores of each crop are computed once per network.
+    """
+    def __init__(self, layout):
+        self.layout = layout
+        self.inks = {}     # (k, variant): (crop, ink map or None)
+        self.scores = {}   # (k, variant, model): word scores
+        self._alternative = []
+
+
+    def alternative(self):
+        """
+            LayoutReader of the alternative layout, or None (computed once).
+        """
+        if not self._alternative:
+            try:
+                layout = self.layout.alternative() if self.layout.alternative else None
+            except WordsNotFound:
+                layout = None
+            self._alternative.append(LayoutReader(layout) if layout else None)
+        return self._alternative[0]
+
+
+    def model_scores(self, k: int, variant: int, model: int) -> np.ndarray | None:
+        """
+            Scores of every word for crop (k, variant) by network `model` (0:
+            first, 1: lowercase), or None if no ink is found on it.
+        """
+        _, ink = self.inks[(k, variant)]
+        if ink is None:
+            return None
+        if (k, variant, model) not in self.scores:
+            first, decoder, lowercase = load_engine()
+            network = lowercase if model else first
+            self.scores[(k, variant, model)] = decoder.scores(network.log_probs(ink))
+        return self.scores[(k, variant, model)]
+
+
+    def read(self, k: int, variant: int, weights: tuple[float, float]) -> WordReading | None:
+        """
+            The CANDIDATES most likely words of crop (k, variant), the scores of
+            the networks being weighted by `weights`; if no ink is found,
+            CANDIDATES words with equal scores. None if there is no such crop.
+        """
+        words = load_engine()[1].words
+        if (k, variant) not in self.inks:
+            crop = self.layout.crop(k, variant)
+            self.inks[(k, variant)] = (crop, None if crop is None else normalize_word(crop))
+        crop, ink = self.inks[(k, variant)]
+        if crop is None:
+            return None
+        if ink is None:
+            return WordReading(crop, [(w, 0.0) for w in words[:CANDIDATES]])
+        if weights[1] == 0:
+            scores = self.model_scores(k, variant, 0)
+        elif weights[0] == 0:
+            scores = self.model_scores(k, variant, 1)
+        else:
+            scores = weights[0] * log_softmax(self.model_scores(k, variant, 0)) \
+                + weights[1] * log_softmax(self.model_scores(k, variant, 1))
+        best = np.argsort(-scores, kind="stable")[:CANDIDATES]
+        return WordReading(crop, [(words[i], float(scores[i])) for i in best])
 
 
 
@@ -135,16 +205,16 @@ def combine(a: list[tuple[str, float]], b: list[tuple[str, float]]) -> list[tupl
 
 
 
-def read_layout(layout, report, model=None, min_seed_probability: float = MIN_SEED_PROBABILITY) -> SeedReading:
+def read_layout(reader: LayoutReader, report, weights: tuple[float, float], min_seed_probability: float) -> SeedReading:
     """
-        Reads the words of `layout` with `model`; `report(fraction)` is called
-        as the reading goes.
+        Reads the words of `reader.layout` with `weights`; `report(fraction)` is
+        called as the reading goes.
     """
+    layout = reader.layout
     words = []
     for k in range(layout.count):
         report(0.9 * k / layout.count)
-        crop = layout.crop(k)
-        words.append(WordReading(crop, read_word(crop, model)))
+        words.append(reader.read(k, 0, weights))
     reading = SeedReading(layout.kind, words, min_seed_probability)
 
     # Re-reads of the least probable words, on their other crops
@@ -154,10 +224,11 @@ def read_layout(layout, report, model=None, min_seed_probability: float = MIN_SE
             if reading.analyze().status == "valid":
                 break
             report(0.9)
-            crops = [c for c in (layout.crop(k, v) for v in range(1, layout.variants)) if c is not None]
-            if crops:
-                best = max((read_word(c, model) for c in crops), key=top_probability)
-                words[k].candidates = combine(words[k].candidates, best)
+            others = [r for r in (reader.read(k, v, weights) for v in range(1, layout.variants)) if r is not None]
+            if others:
+                best = max((r.candidates for r in others), key=top_probability)
+                words[k] = WordReading(words[k].image, combine(words[k].candidates, best))
+                reading = SeedReading(layout.kind, words, min_seed_probability)
 
     # Two columns of equal length: column by column, or row by row if only
     # that order gives a valid seed
@@ -170,18 +241,16 @@ def read_layout(layout, report, model=None, min_seed_probability: float = MIN_SE
 
 
 
-def read_page(layout, report, model=None, min_seed_probability: float = MIN_SEED_PROBABILITY) -> SeedReading:
+def read_page(reader: LayoutReader, report, weights: tuple[float, float], min_seed_probability: float) -> SeedReading:
     """
-        Reads `layout` with `model`, and its list reading if it is a card found
-        on part of its lines that gives no valid seed (the better one is kept).
+        Reads `reader.layout` with `weights`, and its list reading if it is a
+        card found on part of its lines that gives no valid seed (the better
+        one is kept).
     """
-    reading = read_layout(layout, lambda f: report(0.85 * f), model, min_seed_probability)
-    if layout.alternative and reading.analyze().status != "valid":
-        try:
-            other = read_layout(layout.alternative(), lambda f: report(0.85 + 0.15 * f), model, min_seed_probability)
-        except WordsNotFound:
-            other = None
-        if other and STATUS_RANK[other.analyze().status] > STATUS_RANK[reading.analyze().status]:
+    reading = read_layout(reader, lambda f: report(0.85 * f), weights, min_seed_probability)
+    if reading.analyze().status != "valid" and reader.alternative():
+        other = read_layout(reader.alternative(), lambda f: report(0.85 + 0.15 * f), weights, min_seed_probability)
+        if STATUS_RANK[other.analyze().status] > STATUS_RANK[reading.analyze().status]:
             reading = other
     return reading
 
@@ -198,17 +267,20 @@ def read_seed(image: Image.Image, progress=None) -> SeedReading:
             progress(fraction)
 
     report(0.0)
-    _, _, lowercase = load_engine()
-    layout = find_words(image.convert("L"))
-    reading = read_page(layout, lambda f: report(0.1 + 0.5 * f))
+    load_engine()
+    reader = LayoutReader(find_words(image.convert("L")))
+    reading = read_page(reader, lambda f: report(0.1 + 0.5 * f), FIRST, MIN_SEED_PROBABILITY)
 
-    # Not valid: read again by the second model, kept if its status is better,
-    # or as good with a more probable seed
-    first = reading.analyze()
-    if first.status != "valid":
-        other = read_page(layout, lambda f: report(0.6 + 0.4 * f), lowercase, LOWERCASE_MIN_SEED_PROBABILITY)
-        second = other.analyze()
-        if (STATUS_RANK[second.status], second.confidence) > (STATUS_RANK[first.status], first.confidence):
-            reading = other
+    # Not valid: read again by the second network, then by the blend of both;
+    # a reading is kept if its status is better, or as good with a more
+    # probable seed
+    best = reading.analyze()
+    if best.status != "valid":
+        second = ((LOWERCASE, LOWERCASE_MIN_SEED_PROBABILITY, 0.6), (BLEND, BLEND_MIN_SEED_PROBABILITY, 0.8))
+        for weights, min_seed_probability, start in second:
+            other = read_page(reader, lambda f, s=start: report(s + 0.2 * f), weights, min_seed_probability)
+            analysis = other.analyze()
+            if (STATUS_RANK[analysis.status], analysis.confidence) > (STATUS_RANK[best.status], best.confidence):
+                reading, best = other, analysis
     report(1.0)
     return reading

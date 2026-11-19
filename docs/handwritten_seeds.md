@@ -52,7 +52,7 @@ The engine is `seedsigner.helpers.handwriting`:
 |---|---|
 | `page.py` | finds the card (corners, rectification, known line positions) or the lines and columns of a list (rotation, line profiles, word numbers), and cuts out one crop per word |
 | `preprocess.py` | turns a word crop into an ink map 32 pixels high |
-| `word_model.py` | small convolutional network (about 160 000 parameters, CTC), run in 16-bit integers |
+| `word_model.py` | small convolutional network (about 160 000 parameters, CTC), run in 16-bit integers; two sets of weights, see [The model](#the-model) |
 | `decoder.py` | log-likelihood of each of the 2 048 BIP39 words (prefix tree, beam pruning); a line number before the word is accepted |
 | `checksum.py` | combinations of plausible words, BIP39 checksum, confidence, uncertain words |
 | `native/handwriting.c` | network and decoder in portable C (no allocation, no CPython), used through `ctypes` when built; the numpy code gives the same network output and word scores within 2e-3 |
@@ -61,6 +61,18 @@ There is no letter segmentation: the network reads the whole word, and the
 dictionary decoding only ever returns BIP39 words. The checksum then rules out
 most wrong combinations; a seed is reported as valid only when no other valid
 seed is nearly as probable and every word is read with high probability.
+
+Two networks of the same size read the words. The first one reads every
+photo. When its seed is not valid, the photo is read again by the second one,
+trained with more lowercase and cursive writing; its reading is kept if its
+status is better, or as good with a more probable seed. A seed of the second
+network needs a probability of 0.85 instead of 0.5 to be reported as valid
+without uncertain words: it reads the photos the first one failed on, where a
+wrong combination passes the checksum more often.
+
+When the seed is invalid, or valid but improbable (probability below 0.1), a
+misread word can be read with high probability of its own while the checksum
+is passed by chance by the other words: every word is then marked uncertain.
 
 The photo is taken through `Camera`, with two optional arguments added for
 this feature; their defaults keep the behavior of the other callers unchanged:
@@ -115,26 +127,49 @@ the numpy timings above.
 ## Accuracy
 
 Measured on 835 photos (800 simulated: cards and free lists, varied hands,
-paper, lighting and framing; 35 real), the engine reads 85 % of the seeds
-exactly and reports 81 % as valid and exact, with no wrong seed reported as
-valid. On 460 other simulated photos, generated independently: 87 % exact,
-84 % valid and exact, no wrong seed reported as valid. Of the real photos,
+paper, lighting and framing; 35 real), the engine reads 86 % of the seeds
+exactly and reports 83 % as valid and exact, with no wrong seed reported as
+valid. On 460 other simulated photos, generated independently: 88 % exact,
+85 % valid and exact, no wrong seed reported as valid. Of the real photos,
 17 of 18 cards and the 6 sharp lists are read exactly and reported as valid;
 the 11 blurry ones are never reported as valid.
+
+These photos are written in capitals. Lowercase and cursive writing is read
+less well. By type of writing (seeds valid and exact / exact / wrong but
+reported as valid; words read correctly):
+
+| Writing | Photos | Valid and exact | Exact | Wrong valid | Words |
+|---|---|---|---|---|---|
+| Capitals (photos above) | 1295 | 1081 | 1120 | 0 | 86 % |
+| Neat cursive (simulated) | 301 | 84 | 144 | 0 | 69 % |
+| Real photos, lowercase and cursive | 4 | 0 | 2 | 0 | 41 of 48 |
+
+The simulated cursive pages are written in 13 handwriting fonts (10
+Playwrite school scripts, League Script, Meddon, Fleur De Leah) never used
+in training, laid out and photographed like the other simulated pages. Most
+cursive seeds are read exactly but reported with words to check: joined
+letters (`nn`/`r`, `ak`/`ar`) and cursive `j` read as `s` are the usual
+confusions. A fast, sloppy cursive is read worst (8 to 9 of 12 words on real
+photos). In every case the uncertain words are marked, and a seed read with
+low confidence has all its words marked.
 
 Most failures are lists cut by the frame of the photo. When the ink of a list
 reaches the edge of the photo, the user is asked to move the camera back
 (36 of 39 such photos in the measurement above); otherwise to retake the photo.
 
-On a Raspberry Pi Zero, with the C library: about 3.5 seconds to load the model
-(once), 5 seconds for a 12-word card, 9 to 12 seconds for a 12-word list.
+On a Raspberry Pi Zero, with the C library: about 3.5 seconds to load the
+models (once), 5 seconds for a 12-word card, 9 to 12 seconds for a 12-word
+list; 12 to 15 seconds for a 12-word list in lowercase or cursive (second
+reading).
 
 
 ## The model
 
 `src/seedsigner/resources/handwriting/word_model.npz` holds the quantized
-weights (SHA-256
-`1faede0402e7e3b48e922f8a82a3d72fcbb7e7354b4909298e31616431e7206a`). They
+weights of the first network (SHA-256
+`1faede0402e7e3b48e922f8a82a3d72fcbb7e7354b4909298e31616431e7206a`) and
+`word_model_lowercase.npz` those of the second one (SHA-256
+`55c2aba311f7e31e4fdbe6e82d17fc820165064c23c1792e1059fa6bf4e3863f`). They
 are produced, from scratch and reproducibly, by the separate
 [seedsigner-ocr](https://github.com/pizza-bitcoiner/seedsigner-ocr)
 repository: synthetic words, real handwritten words, training, then
@@ -154,6 +189,11 @@ Training data of these weights:
   included here.
 - The BIP39 English word list, and the BIP39 lists of the other Latin-script
   languages (accents removed) as non-target words.
+- Second network only: more synthetic words in lowercase, written as whole
+  words in cursive fonts, and BIP39 words written in the hands of GNHK writers
+  by Emuru (Pippi et al., "Zero-Shot Styled Text Image Generation, but Make It
+  Autoregressive", CVPR 2025; model under the MIT license), checked by a
+  vision model.
 
 
 ## Limits and threat model

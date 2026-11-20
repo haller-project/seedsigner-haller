@@ -83,7 +83,7 @@ void hw_border_connected(const uint8_t *mask, int h, int w, uint8_t *reached, in
 
 /*
  * Word detector: fully convolutional network finding the words, the line
- * numbers and the seed card on a photo reduced to HW_DETECTOR_WIDTH x
+ * numbers and the cards on a photo reduced to HW_DETECTOR_WIDTH x
  * HW_DETECTOR_HEIGHT (layout written by haller.detector.quantize).
  *   e1-e4: conv 3x3, max 2x2 ; e5, e6: conv 3x3 ; e7: conv 3x3, max 2x2 ;
  *   e8: conv 3x3 ; d4 = conv 3x3 (e6 + up(e8)) ; d3 = conv (e3 + up(d4)) ;
@@ -97,7 +97,7 @@ void hw_border_connected(const uint8_t *mask, int h, int w, uint8_t *reached, in
 #define HW_DETECTOR_WIDTH 288
 #define HW_DETECTOR_HEIGHT 384
 #define HW_DETECTOR_LAYERS 12
-#define HW_DETECTOR_OUTPUTS 8
+#define HW_DETECTOR_OUTPUTS 11
 
 typedef struct {
     int channels[HW_DETECTOR_LAYERS];

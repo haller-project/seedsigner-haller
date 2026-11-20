@@ -323,8 +323,8 @@ elsewhere, and on a constant table for the log-add of the decoder:
 12 of its 1,025 values. Only the log-softmax calls `libm` (`expf`, `logf`).
 
 The word detector has its own vectors, `haller-1-detector-vectors.json`,
-written with its weights by `haller.detector_export` (Haller repository,
-branch `detector`): two synthetic images (a page of strokes, a card with
+written with its weights by `haller.detector_export` (Haller repository):
+two synthetic images (a page of strokes, a card with
 printed lines) and the SHA-256 of the output maps of the C library, which
 `haller.detector_export` also compares with the integer reference in numpy
 (`haller.detector.integer_forward`). They pass on the Pi Zero (SMLAD) as on
@@ -482,6 +482,18 @@ They are produced, from scratch and reproducibly, by the separate
 [Haller](https://github.com/haller-project/haller) repository (tag
 `haller-1`): synthetic words, real handwritten words, training, then
 quantization. Photos taken by users are never used.
+
+`resources/handwriting/haller-weights.json` names the Haller version of the
+weights (`haller-1`), the SHA-256 of each weight file and its release page;
+`tests/test_handwriting_weights.py` checks that every weight file is listed
+there, matches its digest, has its reference vectors and is the one the
+engine loads, and that this page quotes the same digests. The weights stay in
+this repository, since the device works offline; the
+[Haller-1 release](https://github.com/haller-project/haller/releases/tag/haller-1)
+(not published yet) carries the same files with the model card, the recipe
+and the evaluation report. New weights (Haller-2, or Haller-1.1 without
+retraining) replace the files, the manifest, the reference vectors and the
+table above together.
 
 Haller is named after Neil M. Haller of Bellcore, author of RFC 1760, "The
 S/KEY One-Time Password System" (1995). S/KEY, designed with Phil Karn and

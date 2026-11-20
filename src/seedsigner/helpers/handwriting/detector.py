@@ -509,12 +509,14 @@ def rectified_crop(photo: Image.Image, quad: list, fill: int) -> Image.Image:
 
 
 
-def list_words(photo: Image.Image, det: Detection) -> WordLayout:
+def list_words(photo: Image.Image, det: Detection, fingerprint=None) -> WordLayout:
     """
         List layout from the detected word boxes. Columns of fewer than
         MIN_COLUMN_LINES lines mostly on the frame are dropped (text of another
-        sheet) when the rest has a valid number of words. No word is certain if
-        a line touches the frame or the list may go on beyond it.
+        sheet) when the rest has a valid number of words. With one line more
+        than a valid number of words, a line accepted by `fingerprint(crop)`
+        is left out (see page.spare_lines). No word is certain if a line
+        touches the frame or the list may go on beyond it.
     """
     columns = group_lines(det.words)
     count = sum(len(c) for c in columns)
@@ -524,6 +526,20 @@ def list_words(photo: Image.Image, det: Detection) -> WordLayout:
         if sum(len(c) for c in kept) in page.SEED_LENGTHS:
             columns = kept
             count = sum(len(c) for c in kept)
+    fill = int(np.median(np.asarray(photo.reduce(16))))
+    spare = spare_outline = None
+    if count not in page.SEED_LENGTHS and count - 1 in page.SEED_LENGTHS and fingerprint is not None:
+        accepted = []
+        for c, i in page.spare_lines(columns):
+            crop = rectified_crop(photo, det.to_photo(columns[c][i].quad(LIST_CROP_MARGINS)), fill)
+            if fingerprint(crop):
+                accepted.append((c, i, crop))
+        if len(accepted) == 1:
+            c, i, spare = accepted[0]
+            spare_outline = det.to_photo(columns[c][i].quad(LIST_CROP_MARGINS))
+            columns = [[b for j, b in enumerate(column) if (k, j) != (c, i)] for k, column in enumerate(columns)]
+            columns = [column for column in columns if column]
+            count -= 1
     output_size = det.maps.shape[2], det.maps.shape[1]
     at_edge = any(column_at_edge(c, output_size) for c in columns) \
         or any(touches_frame(det.to_photo(b.quad()), photo.size) for c in columns for b in c)
@@ -534,38 +550,43 @@ def list_words(photo: Image.Image, det: Detection) -> WordLayout:
     if upside_down(lines, det.numbers):
         quads = [q[2:] + q[:2] for q in reversed(quads)]
         columns.reverse()
-    fill = int(np.median(np.asarray(photo.reduce(16))))
 
     def crop(k, variant):
         return None if variant else rectified_crop(photo, quads[k], fill)
 
-    return WordLayout("list", count, page.reading_orders(len(columns), count), 1, crop, lambda k: quads[k],
-                      complete=not at_edge)
+    layout = WordLayout("list", count, page.reading_orders(len(columns), count), 1, crop, lambda k: quads[k],
+                        complete=not at_edge)
+    layout.fingerprint = spare
+    layout.fingerprint_outline = spare_outline
+    return layout
 
 
 
 def stray_words(det: Detection, layout: WordLayout) -> int:
     """
         Number of detected words whose center lies outside every crop of
-        `layout` (photo pixels).
+        `layout` (photo pixels) and outside its fingerprint line.
     """
     outlines = [layout.outline(k) for k in range(layout.count)]
+    if getattr(layout, "fingerprint_outline", None) is not None:
+        outlines.append(layout.fingerprint_outline)
     centers = det.to_photo([b.point(b.middle, b.c) for b in det.words])
     return sum(not any(inside(q, c) for q in outlines) for c in centers)
 
 
 
-def find_words(image: Image.Image, step=page.no_step) -> WordLayout:
+def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordLayout:
     """
         Words of the card or list on `image` (upright grayscale photo, full
         resolution) found by the detector; `layout.stray`: detected words left
         out of its crops (see MAX_STRAY_WORDS). Raises WordsNotFound if no card
         is found and no list with a valid number of lines either.
+        `fingerprint`: see page.find_words.
     """
     det = detect(image)
     step(DETECTOR_COST)
     card = find_card(det)
-    layout = card_words(image, det, card, step) if card else list_words(image, det)
+    layout = card_words(image, det, card, step) if card else list_words(image, det, fingerprint)
     layout.stray = stray_words(det, layout)
     if layout.stray > MAX_STRAY_WORDS:
         layout.complete = False

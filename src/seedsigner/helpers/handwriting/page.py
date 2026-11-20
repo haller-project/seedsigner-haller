@@ -149,6 +149,9 @@ class WordLayout:
             no word is then certain unless confirmed
         number_crop: None, or a function returning the grayscale crop of the
             number written before word k, or None if none was found
+        fingerprint: None, or the grayscale crop of a line left out of the
+            words because it reads as a master key fingerprint (see
+            spare_lines)
     """
     def __init__(self, kind: str, count: int, orders: list[list[int]], variants: int, crop, outline,
                  alternative=None, complete: bool = True, number_crop=None):
@@ -161,6 +164,7 @@ class WordLayout:
         self.alternative = alternative
         self.complete = complete
         self.number_crop = number_crop
+        self.fingerprint = None
 
 
     def crop(self, k: int, variant: int = 0) -> Image.Image | None:
@@ -188,18 +192,19 @@ def no_step(cost: float):
 
 
 
-def find_words(image: Image.Image, step=no_step) -> WordLayout:
+def find_words(image: Image.Image, step=no_step, fingerprint=None) -> WordLayout:
     """
         Words of the card or list on `image` (upright grayscale photo, full
         resolution). Raises WordsNotFound if no card is found and no list with a
         valid number of lines either. `step(cost)` is called as the search goes
-        (see SEARCH_COST).
+        (see SEARCH_COST). `fingerprint(crop)`: True if the line on `crop` is a
+        master key fingerprint rather than a word (see spare_lines).
     """
-    return locate(image, image.reduce(2), step)
+    return locate(image, image.reduce(2), step, fingerprint)
 
 
 
-def locate(image: Image.Image, half: Image.Image, step=no_step) -> WordLayout:
+def locate(image: Image.Image, half: Image.Image, step=no_step, fingerprint=None) -> WordLayout:
     """
         find_words, with `half` the photo reduced by half (for example decoded
         at half size from a JPEG file).
@@ -224,21 +229,21 @@ def locate(image: Image.Image, half: Image.Image, step=no_step) -> WordLayout:
         scale = image.width / half.width
         layout = card_layout(image, [(x * scale, y * scale) for x, y in quad], kind, step, threshold)
         if found < 1.0:
-            layout.alternative = lambda: list_layout(image, half, step)
+            layout.alternative = lambda: list_layout(image, half, step, fingerprint=fingerprint)
         # writing this small is read with no certain word
         layout.complete = bool(quad_area(quad) >= MIN_SURE_CARD_AREA * half.width * half.height)
         return layout
-    return list_layout(image, half, step)
+    return list_layout(image, half, step, fingerprint=fingerprint)
 
 
 
-def find_aligned_words(image: Image.Image, step=no_step) -> WordLayout:
+def find_aligned_words(image: Image.Image, step=no_step, fingerprint=None) -> WordLayout:
     """
         Words of a list of two columns too close for find_words to tell apart
         (see aligned_columns), on `image` as for find_words. Raises
         WordsNotFound if no such list is found.
     """
-    return list_layout(image, image.reduce(2), step, aligned=True)
+    return list_layout(image, image.reduce(2), step, aligned=True, fingerprint=fingerprint)
 
 
 
@@ -1668,12 +1673,31 @@ def reading_orders(columns: int, count: int) -> list[list[int]]:
     return orders
 
 
-def list_layout(photo: Image.Image, half: Image.Image, step=no_step, aligned: bool = False) -> WordLayout:
+def spare_lines(columns: list[list[tuple[int, int, int, int]]]) -> list[tuple[int, int]]:
+    """
+        (column, line) of the lines of a list that may be a fingerprint
+        written with the words, when the list has one line more than a valid
+        number of words: the first line of the list and the last line of
+        each column. With two columns, only lines whose removal leaves two
+        columns of the same length.
+    """
+    found = []
+    for c, i in [(0, 0)] + [(c, len(column) - 1) for c, column in enumerate(columns)]:
+        lengths = [len(column) - (j == c) for j, column in enumerate(columns)]
+        if (c, i) not in found and (len(columns) == 1 or len(set(x for x in lengths if x)) == 1):
+            found.append((c, i))
+    return found
+
+
+def list_layout(photo: Image.Image, half: Image.Image, step=no_step, aligned: bool = False,
+                fingerprint=None) -> WordLayout:
     """
         Free list: page straightened, lines and numbers found on `half`; crops
         cut from `photo` with the same rotation. `aligned`: the lines are those
         of two close columns cut at the start of the right one (see
-        aligned_columns).
+        aligned_columns). `fingerprint(crop)`: see find_words; with one line
+        more than a valid number of words, the only line of spare_lines it
+        accepts is left out (layout.fingerprint).
     """
     ink = ink_mask(half)
     step(INK_MASK_COST)
@@ -1695,7 +1719,37 @@ def list_layout(photo: Image.Image, half: Image.Image, step=no_step, aligned: bo
     else:
         columns = (aligned_columns(page, ink) or []) if aligned else find_lines(page, ink)
     step(LINES_COST)
+
+    f = int(round(photo.width / half.width))
+    matrix = rotation_matrix(angle, half.size) if angle else None
+    fill = int(np.median(np.asarray(photo.reduce(16)))) if angle else 255
+
+    def crop_coefficients(box):
+        """ (x0, y0, x1, y1) of a box of the half page on the straightened photo, affine coefficients to the photo """
+        x0, y0, x1, y1 = (int(round(v * f)) for v in box)
+        a, b, c, d, e, g = matrix or (1, 0, 0, 0, 1, 0)
+        return (x0, y0, x1, y1), (a, b, a * x0 + b * y0 + f * c, d, e, d * x0 + e * y0 + f * g)
+
+    def cut_box(box):
+        (x0, y0, x1, y1), coefficients = crop_coefficients(box)
+        if matrix is None:
+            return photo.crop((x0, y0, x1, y1))
+        return photo.transform((x1 - x0, y1 - y0), Image.AFFINE, coefficients, Image.BILINEAR, fillcolor=fill)
+
     count = sum(len(c) for c in columns)
+    spare = spare_box = None
+    if count not in SEED_LENGTHS and count - 1 in SEED_LENGTHS and fingerprint is not None:
+        accepted = []
+        for c, i in spare_lines(columns):
+            box = columns[c][i] if aligned else widen_line(page, columns[c][i])[0]
+            crop = cut_box(box)
+            if fingerprint(crop):
+                accepted.append((c, i, crop, box))
+        if len(accepted) == 1:
+            c, i, spare, spare_box = accepted[0]
+            columns = [[b for j, b in enumerate(column) if (k, j) != (c, i)] for k, column in enumerate(columns)]
+            columns = [column for column in columns if column]
+            count -= 1
     if count not in SEED_LENGTHS:
         raise WordsNotFound(f"{count} lines found", at_edge=at_edge, line_count=count)
     boxes, widened, numbers = [], [], []
@@ -1710,33 +1764,20 @@ def list_layout(photo: Image.Image, half: Image.Image, step=no_step, aligned: bo
             cut = x is not None and b[0] < x < b[2]
             boxes.append((x, b[1], b[2], b[3]) if cut else b)
             numbers.append((b[0], b[1], x, b[3]) if cut else None)
-    complete = not unread_text(ink, widened)
-
-    f = int(round(photo.width / half.width))
-    matrix = rotation_matrix(angle, half.size) if angle else None
-    fill = int(np.median(np.asarray(photo.reduce(16)))) if angle else 255
-
-    def crop_coefficients(box):
-        """ (x0, y0, x1, y1) of a box of the half page on the straightened photo, affine coefficients to the photo """
-        x0, y0, x1, y1 = (int(round(v * f)) for v in box)
-        a, b, c, d, e, g = matrix or (1, 0, 0, 0, 1, 0)
-        return (x0, y0, x1, y1), (a, b, a * x0 + b * y0 + f * c, d, e, d * x0 + e * y0 + f * g)
-
-    def cut(box):
-        (x0, y0, x1, y1), coefficients = crop_coefficients(box)
-        if matrix is None:
-            return photo.crop((x0, y0, x1, y1))
-        return photo.transform((x1 - x0, y1 - y0), Image.AFFINE, coefficients, Image.BILINEAR, fillcolor=fill)
+    # the fingerprint line is not text left out
+    complete = not unread_text(ink, widened + ([[spare_box]] if spare is not None else []))
 
     def crop(k, variant):
-        return None if variant else cut(boxes[k])
+        return None if variant else cut_box(boxes[k])
 
     def number_crop(k):
-        return cut(numbers[k]) if numbers[k] else None
+        return cut_box(numbers[k]) if numbers[k] else None
 
     def outline(k):
         (x0, y0, x1, y1), (a, b, c, d, e, g) = crop_coefficients(boxes[k])
         return [(a * u + b * v + c, d * u + e * v + g) for u, v in ((0, 0), (x1 - x0, 0), (x1 - x0, y1 - y0), (0, y1 - y0))]
 
-    return WordLayout("list", count, reading_orders(len(columns), count), 1, crop, outline, complete=complete,
-                      number_crop=number_crop)
+    layout = WordLayout("list", count, reading_orders(len(columns), count), 1, crop, outline, complete=complete,
+                        number_crop=number_crop)
+    layout.fingerprint = spare
+    return layout

@@ -226,6 +226,43 @@ line of the card is out of the photo, no word is read: the user is asked to
 move the camera back so that the whole card fits. Lists are straightened up
 to 30 degrees.
 
+### Fingerprint line
+
+Many users write the fingerprint of the master key (8 hexadecimal digits,
+the first 4 bytes of the HASH160 of the BIP32 master public key, as shown by
+wallets and by SeedSigner) under their words, sometimes after « FP: »,
+« xfp » or « fingerprint ». The list then has one line more than a valid
+number of words (13 lines for 12 words). When a list found by the rules, by
+the detector or as two close columns has a number of lines one above a
+valid number of words, the lines that may be such a fingerprint (the first
+line of the list and the last line of each column, a removal that leaves two
+columns of equal length when there are two) are read by both networks
+(`fingerprint.py`):
+
+- the outputs of the network are decoded by CTC constrained to one of the
+  prefixes « », « fp », « xfp », « mfp », « fingerprint » (the colon and
+  spaces read as blanks) followed by exactly 8 hexadecimal digits: the sum
+  over every string of 8 digits is the likelihood of the line being a
+  fingerprint;
+- the *word margin* compares it with the likelihood of the best BIP39 word
+  of the line, the *fit* with the most probable path of the network without
+  constraint (a line of two words merged by the detector, « 12. ORIENT 24.
+  FEED », is better explained by any 8 digits than by any single word, but
+  far worse than by its own reading).
+
+The line is left out of the words when, on the mean of both networks, the
+word margin is at least 17 and the fit at least −21
+(`FINGERPRINT_MARGIN`, `FINGERPRINT_FIT`), and only if exactly one of the
+candidate lines passes. The thresholds were chosen on simulated pages kept
+apart from the test photos (DEV2 and lists with a fingerprint): 72 % of 660
+fingerprints are left out; through the whole reading of every bench, none of
+1 208 word lines comes within 3 of both thresholds (with a margin of 12, one
+line of a 24-word card read as a list was left out). A fingerprint of digits only, which the second network reads poorly, is
+often kept as a line, and the list is then reported with its number of lines
+as before. The line left out is kept with the layout (`layout.fingerprint`).
+The official SeedSigner card has no such line: its fingerprint box is on the
+back.
+
 `read_seed(image, progress, on_word)` reports its progress after every step
 of the page search and of the reading. Each step is weighted by its expected
 duration on a Pi Zero (constants `*_COST` in `page.py` and `__init__.py`) and

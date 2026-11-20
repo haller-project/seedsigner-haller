@@ -139,7 +139,7 @@ def test_second_readings_only_when_the_seed_is_not_valid(monkeypatch):
     valid = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".split()
     for words, second in ((valid, 0), (valid[:-1] + ["zoo"], len(valid))):
         calls = counting_networks(monkeypatch)
-        monkeypatch.setattr(hw, "find_words", lambda image, step, words=words: fake_layout(words))
+        monkeypatch.setattr(hw, "find_words", lambda image, step, words=words, **_: fake_layout(words))
         reading = hw.read_seed(Image.new("L", (10, 10)))
         assert [w.candidates[0][0] for w in reading.words] == words
         assert calls == {"first": len(words), "lowercase": second}
@@ -165,7 +165,7 @@ def test_read_seed_reports_progress(monkeypatch):
     """ The progress goes forward from 0 to 1, and each word read is reported. """
     import seedsigner.helpers.handwriting as hw
     words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".split()
-    monkeypatch.setattr(hw, "find_words", lambda image, step: fake_layout(words))
+    monkeypatch.setattr(hw, "find_words", lambda image, step, **_: fake_layout(words))
     fractions, read = [], []
     hw.read_seed(Image.new("L", (10, 10)), progress=fractions.append,
                  on_word=lambda layout, k, reading: read.append((k, reading.candidates[0][0])))

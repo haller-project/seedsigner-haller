@@ -24,7 +24,7 @@ import threading
 import numpy as np
 from PIL import Image
 
-from . import detector
+from . import detector, fingerprint
 from .checksum import Analysis, MIN_PLAUSIBLE_SEED, MIN_SEED_PROBABILITY
 from .decoder import number_probabilities
 from .page import LIST_SEARCH_COST, RECTIFY_COSTS, SEARCH_COST, WordsNotFound, find_aligned_words, find_words
@@ -90,6 +90,19 @@ AGREEMENT_PROBABILITY = 0.9
 # random words: the reading is kept only if its seed probability reaches
 # ALIGNED_MIN_SEED_PROBABILITY (1e-9 to 1e-16 for random words).
 ALIGNED_MIN_SEED_PROBABILITY = 1e-4
+
+# A list with one line more than a valid number of words may carry the master
+# key fingerprint written under (or above) the words: its first line, or the
+# last line of a column, is left out of the words if it reads as 8
+# hexadecimal digits (see fingerprint.margins), the mean over both networks
+# of its log-likelihood exceeding that of its best BIP39 word by at least
+# FINGERPRINT_MARGIN, and falling short of the free reading of the network
+# by at most -FINGERPRINT_FIT. Chosen on simulated pages kept apart from the
+# test photos (DEV2, lists with a fingerprint): 72 % of 660 fingerprints left
+# out; checked through the whole reading on every bench, none of 1 208 word
+# lines within 3 of both thresholds.
+FINGERPRINT_MARGIN = 17.0
+FINGERPRINT_FIT = -21.0
 
 # Expected duration of the steps of a reading, in seconds on a Pi Zero (see
 # Progress): loading of the models, reading of a word by the first network
@@ -510,6 +523,45 @@ def agrees(other: SeedReading, reading: SeedReading | None, plausible: list) -> 
 
 
 
+def fingerprint_margins(crop: Image.Image) -> list[tuple[float, float]] | None:
+    """
+        fingerprint.margins of the line on `crop` for the first and the
+        second network, or None if no ink is found.
+    """
+    ink = normalize_word(crop)
+    if ink is None:
+        return None
+    first, decoder, lowercase = load_engine()
+    found = []
+    for network in (first, lowercase):
+        log_probs = network.log_probs(ink)
+        found.append(fingerprint.margins(log_probs, decoder.scores(log_probs)))
+    return found
+
+
+
+def is_fingerprint(crop: Image.Image) -> bool:
+    """
+        True if the line on `crop` reads as a fingerprint rather than a word
+        (see FINGERPRINT_MARGIN).
+    """
+    return fingerprint_accepted(fingerprint_margins(crop))
+
+
+
+def fingerprint_accepted(found: list[tuple[float, float]] | None) -> bool:
+    """
+        True if the margins of a line by both networks (fingerprint_margins)
+        make it a fingerprint (see FINGERPRINT_MARGIN).
+    """
+    if found is None:
+        return False
+    margin = sum(m for m, _ in found) / len(found)
+    fit = sum(f for _, f in found) / len(found)
+    return margin >= FINGERPRINT_MARGIN and fit >= FINGERPRINT_FIT
+
+
+
 def complete_uncertain(reading: SeedReading) -> bool:
     """
         True if `reading` is uncertain on a complete layout.
@@ -534,8 +586,13 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
     gray = image.convert("L")
     plausible = []
     not_found = None
+
+    def spare_line(crop):
+        progress.step(WORD_COST + OTHER_WORD_COST)
+        return is_fingerprint(crop)
+
     try:
-        layout = find_words(gray, progress.step)
+        layout = find_words(gray, progress.step, fingerprint=spare_line)
     except WordsNotFound as e:
         reading, not_found = None, e
     else:
@@ -549,7 +606,7 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
     if reading is None or reading.analyze().status == "invalid" or not reading.complete:
         progress.expect(detector.DETECTOR_COST + 12 * (WORD_COST + OTHER_WORD_COST))
         try:
-            layout = detector.find_words(gray, progress.step)
+            layout = detector.find_words(gray, progress.step, fingerprint=spare_line)
         except WordsNotFound:
             layout = None
         if layout is not None:
@@ -566,7 +623,7 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
     if not_found is not None and not not_found.card and (reading is None or reading.analyze().status != "valid"):
         progress.expect(LIST_SEARCH_COST + 12 * (WORD_COST + OTHER_WORD_COST))
         try:
-            layout = find_aligned_words(gray, progress.step)
+            layout = find_aligned_words(gray, progress.step, fingerprint=spare_line)
         except WordsNotFound:
             layout = None
         if layout is not None:

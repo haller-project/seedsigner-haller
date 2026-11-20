@@ -51,6 +51,37 @@ Nothing is written to disk: the photo and the readings only live in memory and
 are dropped with the views.
 
 
+## Trying it on a development machine
+
+There is no desktop emulator in this repository. On a development machine
+(Python 3.10 or later, a C compiler and `make`):
+
+```bash
+pip install -r requirements.txt && pip install -e . && pip install numpy
+make -C src/seedsigner/helpers/handwriting/native
+```
+
+then read a photo (upright, full resolution) with the engine:
+
+```python
+from PIL import Image
+from seedsigner.helpers.handwriting import read_seed
+
+analysis = read_seed(Image.open("photo.jpg")).analyze()
+print(analysis.status, " ".join(analysis.mnemonic), analysis.uncertain)
+```
+
+`status` is `valid`, `uncertain` (valid checksum, words to check, listed in
+`uncertain`) or `invalid`; `read_seed` raises `WordsNotFound` when no card or
+list of 12 to 24 words is found. Use test photos only (for example the BIP39
+test vectors written by hand), never a real seed.
+
+The screens of the feature are rendered by the screenshot generator, as in the
+CI (`python setup.py compile_catalog` first, see `tests/README.md`):
+`python -m pytest tests/screenshot_generator/generator.py` writes them to
+`seedsigner-screenshots/<language>/handwritten_seed_views/`.
+
+
 ## How it works
 
 The engine is `seedsigner.helpers.handwriting`:
@@ -259,10 +290,14 @@ make -C src/seedsigner/helpers/handwriting/native CFLAGS_ARCH="-mcpu=arm1176jzf-
 
 The built library is ignored by git. SeedSigner OS builds it for each board
 when the image is built (Buildroot package `seedsigner-handwriting`, branch
-`handwritten-seed` of the SeedSigner OS fork): the Buildroot toolchain wrapper
-adds the board's CPU flags (pi0: `-mcpu=arm1176jzf-s -mfpu=vfp
--mfloat-abi=hard`), the other flags are those of the Makefile. The device has
-no compiler.
+`handwritten-seed` of the SeedSigner OS fork, not published yet): the
+Buildroot toolchain wrapper adds the board's CPU flags (pi0:
+`-mcpu=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard`), the other flags are those
+of the Makefile. The device has no compiler. Until that fork is published, the
+feature runs on a Pi installed by hand
+([Raspberry Pi OS build instructions](raspberry_pi_os_build_instructions.md)),
+with the library built on the Pi by the second command above, and numpy
+installed (`requirements-raspi.txt`).
 
 ### Reference vectors
 
@@ -440,7 +475,7 @@ described in [How it works](#how-it-works):
 | `haller-1-detector.npz` | word detector, when the rules find no valid seed | `bcda59a220e52979139f44a634a0946dd9d4fe72cd4b246ee23edc6437964aa4` |
 
 They are produced, from scratch and reproducibly, by the separate
-[Haller](https://github.com/pizza-bitcoiner/haller) repository (tag
+[Haller](https://github.com/haller-project/haller) repository (tag
 `haller-1`): synthetic words, real handwritten words, training, then
 quantization. Photos taken by users are never used.
 

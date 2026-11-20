@@ -96,20 +96,21 @@ size_t hw_network_work_size(const hw_network *net, int width)
 }
 
 
-/* First convolution (1 input channel): input zero-padded ((H+2) x (W+2)),
- * accumulators H x W x c1 */
-static void conv_first(const int16_t *in, int W, const hw_network *net, int32_t *acc)
+/* First convolution (1 input channel): input zero-padded ((Hc+2) x (W+2)),
+ * accumulators Hc x W x O, weights [O][9] */
+static void conv_first(const int16_t *in, int Hc, int W, const int16_t *w, const int32_t *bias, int O,
+                       int32_t *acc)
 {
-    const int C1 = net->c1, WB = W + 2;
-    for (int o = 0; o < C1; o++) {
-        const int16_t *k = net->w[0] + o * 9;
+    const int WB = W + 2;
+    for (int o = 0; o < O; o++) {
+        const int16_t *k = w + o * 9;
         const int32_t k0 = k[0], k1 = k[1], k2 = k[2], k3 = k[3], k4 = k[4],
-                      k5 = k[5], k6 = k[6], k7 = k[7], k8 = k[8], b = net->b[0][o];
-        for (int y = 0; y < H; y++) {
+                      k5 = k[5], k6 = k[6], k7 = k[7], k8 = k[8], b = bias[o];
+        for (int y = 0; y < Hc; y++) {
             const int16_t *r0 = in + y * WB, *r1 = r0 + WB, *r2 = r1 + WB;
-            int32_t *t = acc + (size_t)y * W * C1 + o;
+            int32_t *t = acc + (size_t)y * W * O + o;
             for (int x = 0; x < W; x++)
-                t[(size_t)x * C1] = b
+                t[(size_t)x * O] = b
                     + k0 * r0[x] + k1 * r0[x + 1] + k2 * r0[x + 2]
                     + k3 * r1[x] + k4 * r1[x + 1] + k5 * r1[x + 2]
                     + k6 * r2[x] + k7 * r2[x + 1] + k8 * r2[x + 2];
@@ -151,12 +152,14 @@ static void NAME(const int16_t *in, int Hc, int W, const int16_t *w, const int32
         }                                                                                    \
     }                                                                                        \
 }
+CONV3X3(conv_8, 8)
 CONV3X3(conv_16, 16)
 CONV3X3(conv_24, 24)
 CONV3X3(conv_32, 32)
 CONV3X3(conv_48, 48)
 CONV3X3(conv_64, 64)
 CONV3X3(conv_96, 96)
+CONV3X3(conv_128, 128)
 
 
 static void conv_any(const int16_t *in, int Hc, int W, int C, const int16_t *w, const int32_t *b, int O,
@@ -190,6 +193,8 @@ static void conv(const int16_t *in, int Hc, int W, int C, const int16_t *w, cons
 {
     if (O % 4)
         conv_any(in, Hc, W, C, w, b, O, acc);
+    else if (C == 8)
+        conv_8(in, Hc, W, w, b, O, acc);
     else if (C == 16)
         conv_16(in, Hc, W, w, b, O, acc);
     else if (C == 24)
@@ -202,6 +207,8 @@ static void conv(const int16_t *in, int Hc, int W, int C, const int16_t *w, cons
         conv_64(in, Hc, W, w, b, O, acc);
     else if (C == 96)
         conv_96(in, Hc, W, w, b, O, acc);
+    else if (C == 128)
+        conv_128(in, Hc, W, w, b, O, acc);
     else
         conv_any(in, Hc, W, C, w, b, O, acc);
 }
@@ -287,7 +294,7 @@ int hw_network_logits(const hw_network *net, const uint8_t *img, int width, void
         for (int x = 0; x < width; x++)
             b[(y + 1) * (W + 2) + x + 1] = (int16_t)(img[y * width + x] << 3);
 
-    conv_first(b, W, net, acc);
+    conv_first(b, H, W, net->w[0], net->b[0], net->c1, acc);
     pool(acc, H, W, c1, 2, 2, net->m[0], a);
     conv(a, 16, W2, c1, net->w[1], net->b[1], c2, acc);
     pool(acc, 16, W2, c2, 2, 2, net->m[1], b);
@@ -623,4 +630,140 @@ void hw_border_connected(const uint8_t *mask, int h, int w, uint8_t *reached, in
                 work[top++] = next[k];
             }
     }
+}
+
+
+/* ---------- word detector ---------- */
+
+/* Layers of the detector: input a (-1: the image), input b upsampled by 2 and
+ * concatenated after a (-1: none), 2x2 max pooling after the convolution.
+ * Encoder e1-e8, decoder d4-d1; the output layer reads d1. */
+static const struct { int8_t a, b, pool; } DET_LAYERS[HW_DETECTOR_LAYERS] = {
+    {-1, -1, 1}, {0, -1, 1}, {1, -1, 1}, {2, -1, 1}, {3, -1, 0}, {4, -1, 0},
+    {5, -1, 1}, {6, -1, 0}, {5, 7, 0}, {2, 8, 0}, {1, 9, 0}, {0, 10, 0},
+};
+
+
+/* sizes (rows, columns) of the layer outputs; offsets in elements of the work
+ * arrays: int32 accumulators, padded input, layer outputs, concatenation */
+typedef struct {
+    int h[HW_DETECTOR_LAYERS], w[HW_DETECTOR_LAYERS];
+    size_t out[HW_DETECTOR_LAYERS], acc, input, cat, act;
+} det_layout;
+
+
+static void detector_layout(const hw_detector *net, det_layout *l)
+{
+    size_t acc = (size_t)HW_DETECTOR_HEIGHT * HW_DETECTOR_WIDTH * net->channels[0], act = 0, cat = 0;
+    for (int i = 0; i < HW_DETECTOR_LAYERS; i++) {
+        const int a = DET_LAYERS[i].a, b = DET_LAYERS[i].b;
+        const int hi = a < 0 ? HW_DETECTOR_HEIGHT : l->h[a], wi = a < 0 ? HW_DETECTOR_WIDTH : l->w[a];
+        const int p = DET_LAYERS[i].pool ? 2 : 1;
+        l->h[i] = hi / p;
+        l->w[i] = wi / p;
+        acc = max_size(acc, (size_t)hi * wi * net->channels[i]);
+        if (b >= 0)
+            cat = max_size(cat, (size_t)hi * wi * (net->channels[a] + net->channels[b]));
+        l->out[i] = act;
+        act += ((size_t)l->h[i] * l->w[i] * net->channels[i] + 1) / 2 * 2;
+    }
+    const int last = HW_DETECTOR_LAYERS - 1;
+    l->acc = max_size(acc, (size_t)l->h[last] * l->w[last] * HW_DETECTOR_OUTPUTS);
+    l->input = (size_t)(HW_DETECTOR_HEIGHT + 2) * (HW_DETECTOR_WIDTH + 2);
+    l->cat = (cat + 1) / 2 * 2;
+    l->act = act;
+}
+
+
+size_t hw_detector_work_size(const hw_detector *net)
+{
+    det_layout l;
+    detector_layout(net, &l);
+    return l.acc * sizeof(int32_t) + (l.input + l.act + l.cat) * sizeof(int16_t);
+}
+
+
+/* Copies tensor t (h/up x w/up x c, nearest upsampling by up = 1 or 2) into
+ * channels [offset, offset + c) of out (h x w x C) */
+static void gather(const int16_t *t, int c, int up, int h, int w, int C, int offset, int16_t *out)
+{
+    const int wt = w / up;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+            memcpy(out + ((size_t)y * w + x) * C + offset, t + ((size_t)(y / up) * wt + x / up) * c,
+                   (size_t)c * sizeof(int16_t));
+}
+
+
+void hw_detector_maps(const hw_detector *net, const uint8_t *img, void *work, float *out)
+{
+    det_layout l;
+    detector_layout(net, &l);
+    int32_t *acc = work;
+    int16_t *input = (int16_t *)(acc + l.acc), *act = input + l.input, *cat = act + l.act;
+    const int HI = HW_DETECTOR_HEIGHT, WI = HW_DETECTOR_WIDTH;
+
+    /* input zero-padded, 0-255 -> 0-2040 */
+    memset(input, 0, sizeof(int16_t) * l.input);
+    for (int y = 0; y < HI; y++)
+        for (int x = 0; x < WI; x++)
+            input[(y + 1) * (WI + 2) + x + 1] = (int16_t)(img[y * WI + x] << 3);
+
+    for (int i = 0; i < HW_DETECTOR_LAYERS; i++) {
+        const int a = DET_LAYERS[i].a, b = DET_LAYERS[i].b, p = DET_LAYERS[i].pool ? 2 : 1;
+        const int O = net->channels[i];
+        if (a < 0) {
+            conv_first(input, HI, WI, net->w[i], net->b[i], O, acc);
+            pool(acc, HI, WI, O, p, p, net->m[i], act + l.out[i]);
+            continue;
+        }
+        const int h = l.h[a], w = l.w[a];
+        int C = net->channels[a];
+        const int16_t *in = act + l.out[a];
+        if (b >= 0) {
+            gather(act + l.out[a], net->channels[a], 1, h, w, C + net->channels[b], 0, cat);
+            gather(act + l.out[b], net->channels[b], 2, h, w, C + net->channels[b], C, cat);
+            C += net->channels[b];
+            in = cat;
+        }
+        conv(in, h, w, C, net->w[i], net->b[i], O, acc);
+        pool(acc, h, w, O, p, p, net->m[i], act + l.out[i]);
+    }
+
+    /* output layer: accumulator * scale + bias, maps channel-major */
+    const int last = HW_DETECTOR_LAYERS - 1, h = l.h[last], w = l.w[last];
+    static const int32_t zero[HW_DETECTOR_OUTPUTS];
+    conv(act + l.out[last], h, w, net->channels[last], net->wo, zero, HW_DETECTOR_OUTPUTS, acc);
+    for (int o = 0; o < HW_DETECTOR_OUTPUTS; o++)
+        for (int i = 0; i < h * w; i++)
+            out[(size_t)o * h * w + i] = (float)acc[(size_t)i * HW_DETECTOR_OUTPUTS + o] * net->so[o] + net->bo[o];
+}
+
+
+int hw_components(const uint8_t *mask, int h, int w, int32_t *labels, int32_t *work)
+{
+    int n = 0;
+    memset(labels, 0, (size_t)h * w * sizeof(int32_t));
+    for (int i = 0; i < h * w; i++) {
+        if (!mask[i] || labels[i])
+            continue;
+        int top = 0;
+        labels[i] = ++n;
+        work[top++] = i;
+        while (top > 0) {
+            const int j = work[--top], y = j / w, x = j % w;
+            for (int dy = -1; dy <= 1; dy++) {
+                if (y + dy < 0 || y + dy >= h)
+                    continue;
+                for (int dx = -1; dx <= 1; dx++) {
+                    const int k = j + dy * w + dx;
+                    if (x + dx >= 0 && x + dx < w && mask[k] && !labels[k]) {
+                        labels[k] = n;
+                        work[top++] = k;
+                    }
+                }
+            }
+        }
+    }
+    return n;
 }

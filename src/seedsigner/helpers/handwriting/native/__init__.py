@@ -1,7 +1,8 @@
 """
     C library of the handwriting reader (handwriting.c): word network,
-    dictionary decoding and the flood fill used to find the card. It is the
-    only implementation of these steps. SeedSigner OS cross-compiles it with
+    dictionary decoding, word detector, and the flood fill and connected
+    components used to find the card and the words. It is the only
+    implementation of these steps. SeedSigner OS cross-compiles it with
     the image; elsewhere, run `make` in this directory.
 
     This module does not use numpy: the reference vectors are checked with it
@@ -41,6 +42,22 @@ class Network(ctypes.Structure):
 
 
 
+# Layers of the word detector, in the order of handwriting.h
+DETECTOR_LAYERS = ("e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "d4", "d3", "d2", "d1")
+DETECTOR_SIZE = (288, 384)  # width, height of the input
+DETECTOR_OUTPUTS = 8
+
+
+
+class Detector(ctypes.Structure):
+    _fields_ = [
+        ("channels", ctypes.c_int * 12),
+        ("w", ctypes.c_void_p * 12), ("b", ctypes.c_void_p * 12), ("m", ctypes.c_void_p * 12),
+        ("wo", ctypes.c_void_p), ("so", ctypes.c_void_p), ("bo", ctypes.c_void_p),
+    ]
+
+
+
 class Trie(ctypes.Structure):
     _fields_ = [
         ("nodes", ctypes.c_int), ("words", ctypes.c_int),
@@ -73,6 +90,14 @@ def load() -> ctypes.CDLL:
         lib.hw_word_scores.restype = None
         lib.hw_word_scores.argtypes = [ctypes.POINTER(Trie), ctypes.c_void_p, ctypes.c_int, ctypes.c_float,
                                        ctypes.c_void_p, ctypes.c_void_p]
+        lib.hw_detector_work_size.restype = ctypes.c_size_t
+        lib.hw_detector_work_size.argtypes = [ctypes.POINTER(Detector)]
+        lib.hw_detector_maps.restype = None
+        lib.hw_detector_maps.argtypes = [ctypes.POINTER(Detector), ctypes.c_void_p, ctypes.c_void_p,
+                                         ctypes.c_void_p]
+        lib.hw_components.restype = ctypes.c_int
+        lib.hw_components.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+                                      ctypes.c_void_p]
         lib.hw_border_connected.restype = None
         lib.hw_border_connected.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
                                             ctypes.c_void_p]
@@ -101,6 +126,22 @@ def network(arrays: dict) -> Network:
     for i, layer in enumerate(LAYERS):
         net.w[i], net.b[i], net.m[i] = (address(arrays[layer + k]) for k in (".weight", ".bias", ".mul"))
     net.wo, net.so, net.bo = (address(arrays[k]) for k in ("out.weight", "out.scale", "out.bias"))
+    net.arrays = arrays
+    return net
+
+
+
+def detector(arrays: dict) -> Detector:
+    """
+        Detector structure pointing to the weight arrays (name -> writable
+        buffer in the layout of handwriting.h, as written by
+        haller.detector.quantize), which it keeps referenced.
+    """
+    net = Detector()
+    for i, layer in enumerate(DETECTOR_LAYERS):
+        net.channels[i] = memoryview(arrays[layer + ".bias"]).nbytes // 4
+        net.w[i], net.b[i], net.m[i] = (address(arrays[layer + k]) for k in (".weight", ".bias", ".mul"))
+    net.wo, net.so, net.bo = (address(arrays[k]) for k in ("head.weight", "head.scale", "head.bias"))
     net.arrays = arrays
     return net
 

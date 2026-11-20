@@ -12,8 +12,9 @@
     plausible readings and flags uncertain words (checksum.py). The network is
     Haller-1, made of two sets of weights: a seed that is not valid with the
     first one is read again by the second one, trained with more lowercase and
-    cursive writing. The result must always be reviewed by the user against
-    the paper.
+    cursive writing. A photo on which the rules of page.py find no valid seed
+    is searched again by the word detector of Haller-1 (detector.py). The
+    result must always be reviewed by the user against the paper.
 """
 import math
 import threading
@@ -21,6 +22,7 @@ import threading
 import numpy as np
 from PIL import Image
 
+from . import detector
 from .checksum import Analysis, MIN_PLAUSIBLE_SEED, MIN_SEED_PROBABILITY
 from .decoder import number_probabilities
 from .page import RECTIFY_COSTS, SEARCH_COST, WordsNotFound, find_words
@@ -72,6 +74,13 @@ TEMPERATURES = {FIRST: 2.2, LOWERCASE: 2.2, BLEND: 2.2}
 # that passes the checksum).
 NUMBER_PROBABILITY = 0.9
 MIN_NUMBER_VOTES = 3
+
+# The detector reading is a second chance to fall on a wrong seed that passes
+# the checksum, and a second reading of words the rules already read: its seed
+# is only declared valid if it agrees with the readings of the rules (see
+# agrees). A word read by the rules with a probability of at least
+# AGREEMENT_PROBABILITY must be the same.
+AGREEMENT_PROBABILITY = 0.9
 
 # Expected duration of the steps of a reading, in seconds on a Pi Zero (see
 # Progress): loading of the models, reading of a word by the first network
@@ -131,6 +140,7 @@ class SeedReading:
         self.doubtful = set() if complete else set(range(len(words)))
         self.ambiguous_order = False
         self.numbered = False
+        self.disputed = False
         self._last = None
 
 
@@ -139,6 +149,16 @@ class SeedReading:
             The words may be in another order: none is certain unless confirmed.
         """
         self.ambiguous_order = True
+        self.doubtful = set(range(len(self.words)))
+        self._last = None
+
+
+    def mark_disputed(self):
+        """
+            Another reading of the photo disagrees: no word is certain unless
+            confirmed.
+        """
+        self.disputed = True
         self.doubtful = set(range(len(self.words)))
         self._last = None
 
@@ -349,10 +369,11 @@ def combine(a: list[tuple[str, float]], b: list[tuple[str, float]]) -> list[tupl
 
 
 def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, float], min_seed_probability: float,
-                on_word=None) -> SeedReading:
+                on_word=None, plausible: list = None) -> SeedReading:
     """
         Reads the words of `reader.layout` with `weights`, reporting each one to
-        `progress` and to `on_word` (see read_seed).
+        `progress` and to `on_word` (see read_seed). The plausible seeds of the
+        reading orders are appended to `plausible`.
     """
     layout = reader.layout
     words = []
@@ -390,8 +411,12 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
         if order is not None:
             reading = readings[order]
             reading.numbered = True
+            if plausible is not None and reading.is_plausible():
+                plausible.append(reading.analyze().mnemonic)
             return reading
     seeds = [r.analyze().mnemonic for r in readings if r.is_plausible()]
+    if plausible is not None:
+        plausible.extend(seeds)
     for alternative in readings[1:]:
         if reading.analyze().status == "invalid" and alternative.analyze().status != "invalid":
             reading = alternative
@@ -402,15 +427,15 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
 
 
 def read_page(reader: LayoutReader, progress: Progress, weights: tuple[float, float], min_seed_probability: float,
-              on_word=None) -> SeedReading:
+              on_word=None, plausible: list = None) -> SeedReading:
     """
         Reads `reader.layout` with `weights`, and its list reading if it is a
         card found on part of its lines that gives no valid seed (the better
         one is kept).
     """
-    reading = read_layout(reader, progress, weights, min_seed_probability, on_word)
+    reading = read_layout(reader, progress, weights, min_seed_probability, on_word, plausible)
     if reading.analyze().status != "valid" and reader.alternative():
-        other = read_layout(reader.alternative(), progress, weights, min_seed_probability, on_word)
+        other = read_layout(reader.alternative(), progress, weights, min_seed_probability, on_word, plausible)
         if STATUS_RANK[other.analyze().status] > STATUS_RANK[reading.analyze().status]:
             reading = other
     return reading
@@ -423,6 +448,64 @@ def reading_cost(layout) -> float:
     """
     rectify = sum(RECTIFY_COSTS) if layout.kind != "list" else 0.0
     return rectify + layout.count * (WORD_COST + OTHER_WORD_COST)
+
+
+
+def read_words(layout, progress: Progress, on_word=None, plausible: list = None) -> SeedReading:
+    """
+        Reads the words of `layout` with the first network; if the seed is not
+        valid, again with the second network, then with the blend of both. A
+        reading is kept if its status is better, or as good with a more
+        probable seed. The plausible seeds of every reading are appended to
+        `plausible`.
+    """
+    reader = LayoutReader(layout)
+    reading = read_page(reader, progress, FIRST, MIN_SEED_PROBABILITY, on_word, plausible)
+    best = reading.analyze()
+    if best.status != "valid":
+        progress.expect(2 * layout.count * OTHER_WORD_COST)
+        second = ((LOWERCASE, LOWERCASE_MIN_SEED_PROBABILITY), (BLEND, BLEND_MIN_SEED_PROBABILITY))
+        for weights, min_seed_probability in second:
+            other = read_page(reader, progress, weights, min_seed_probability, plausible=plausible)
+            analysis = other.analyze()
+            if (STATUS_RANK[analysis.status], analysis.confidence) > (STATUS_RANK[best.status], best.confidence):
+                reading, best = other, analysis
+    return reading
+
+
+
+def agrees(other: SeedReading, reading: SeedReading | None, plausible: list) -> bool:
+    """
+        True if the valid seed of `other` (detector reading) may stay valid
+        given the readings of the rules: `reading`, the one kept (None if no
+        words were found), and `plausible`, the plausible seeds of all of them.
+        * No plausible seed of the rules differs from it.
+        * The rules did not find an uncertain seed on a complete layout: their
+          uncertainty is then about the words themselves, which a second
+          reading does not remove. Only a layout the rules found incomplete
+          (text left out, small card) or read as an invalid seed may be read
+          anew.
+        * No word read by the rules (same number of words) with a probability
+          of at least AGREEMENT_PROBABILITY differs from it.
+    """
+    seed = other.analyze().mnemonic
+    if any(s != seed for s in plausible):
+        return False
+    if reading is not None and complete_uncertain(reading):
+        return False
+    if reading is not None and len(reading.words) == len(seed):
+        for word, chosen in zip(reading.words, seed):
+            if word.candidates[0][0] != chosen and top_probability(word.candidates) >= AGREEMENT_PROBABILITY:
+                return False
+    return True
+
+
+
+def complete_uncertain(reading: SeedReading) -> bool:
+    """
+        True if `reading` is uncertain on a complete layout.
+    """
+    return reading.complete and reading.analyze().status == "uncertain"
 
 
 
@@ -439,22 +522,36 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
         progress.expect(progress.remaining + LOAD_COST)
         load_engine()
         progress.step(LOAD_COST)
-    layout = find_words(image.convert("L"), progress.step)
-    progress.expect(reading_cost(layout))
-    reader = LayoutReader(layout)
-    reading = read_page(reader, progress, FIRST, MIN_SEED_PROBABILITY, on_word)
+    gray = image.convert("L")
+    plausible = []
+    try:
+        layout = find_words(gray, progress.step)
+    except WordsNotFound as e:
+        reading, not_found = None, e
+    else:
+        progress.expect(reading_cost(layout))
+        reading = read_words(layout, progress, on_word, plausible)
 
-    # Not valid: read again by the second network, then by the blend of both;
-    # a reading is kept if its status is better, or as good with a more
-    # probable seed
-    best = reading.analyze()
-    if best.status != "valid":
-        progress.expect(2 * layout.count * OTHER_WORD_COST)
-        second = ((LOWERCASE, LOWERCASE_MIN_SEED_PROBABILITY), (BLEND, BLEND_MIN_SEED_PROBABILITY))
-        for weights, min_seed_probability in second:
-            other = read_page(reader, progress, weights, min_seed_probability)
+    # No valid seed: the words are searched again by the detector; its reading
+    # is kept if its status is better, or as good with a more probable seed.
+    # Not when the rules read an uncertain seed on a complete layout: the
+    # detector could not make it valid (see agrees).
+    if reading is None or reading.analyze().status == "invalid" or not reading.complete:
+        progress.expect(detector.DETECTOR_COST + 12 * (WORD_COST + OTHER_WORD_COST))
+        try:
+            layout = detector.find_words(gray, progress.step)
+        except WordsNotFound:
+            layout = None
+        if layout is not None:
+            progress.expect(reading_cost(layout))
+            other = read_words(layout, progress, on_word)
+            if other.analyze().status == "valid" and not agrees(other, reading, plausible):
+                other.mark_disputed()
             analysis = other.analyze()
-            if (STATUS_RANK[analysis.status], analysis.confidence) > (STATUS_RANK[best.status], best.confidence):
-                reading, best = other, analysis
+            if reading is None or (STATUS_RANK[analysis.status], analysis.confidence) \
+                    > (STATUS_RANK[reading.analyze().status], reading.analyze().confidence):
+                reading = other
+    if reading is None:
+        raise not_found
     progress.report(1.0)
     return reading

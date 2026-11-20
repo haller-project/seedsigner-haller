@@ -61,8 +61,9 @@ The engine is `seedsigner.helpers.handwriting`:
 | `preprocess.py` | turns a word crop into an ink map 32 pixels high |
 | `word_model.py` | small convolutional network (about 160 000 parameters, CTC), run in 16-bit integers; two sets of weights, see [The Haller-1 model](#the-haller-1-model) |
 | `decoder.py` | log-likelihood of each of the 2 048 BIP39 words (prefix tree, beam pruning); a line number before the word is accepted; probability of each line number |
+| `detector.py` | word detector of Haller-1: finds the words, the line numbers and the card when the rules of `page.py` give no valid seed, see [Word detector](#word-detector) |
 | `checksum.py` | combinations of plausible words, BIP39 checksum, probability of the seed and of each word given the checksum, uncertain words |
-| `native/handwriting.c` | network, decoder and the flood fill of the card search in portable C (no allocation, no CPython), used through `ctypes`; required, see [C library](#c-library) |
+| `native/handwriting.c` | networks, decoder, flood fill and connected components in portable C (no allocation, no CPython), used through `ctypes`; required, see [C library](#c-library) |
 
 There is no letter segmentation: the network reads the whole word, and the
 dictionary decoding only ever returns BIP39 words. The checksum then rules out
@@ -140,6 +141,40 @@ were all uncertain, 29 are now valid and exact; the other photos measured do
 not change (1 605 photos: 1 195 valid and exact instead of 1 189, no wrong
 seed reported as valid).
 
+### Word detector
+
+When the rules of `page.py` find no card or list, or a seed that is not
+valid, the photo is searched again by the word detector of Haller-1, and its
+words are read the same way; its reading is kept if its status is better, or
+as good with a more probable seed. The detector is a small fully
+convolutional network (U-Net, 223 000 parameters, same 16-bit integer
+arithmetic as the word network) on the photo reduced to 288 x 384 pixels;
+it outputs maps of the word and line number kernels, of the card area and of
+its four corners, and of the height of the boxes. A card is placed from its
+corners (or those of the rules when both designate the same card, these
+being more precise) and cut along its printed lines as before; a list is cut
+around the detected word boxes, grouped into lines and columns.
+
+A second search is a second chance to fall on a wrong seed that passes the
+checksum, and a second reading of words the rules already read. Its seed is
+only declared valid if:
+
+- no reading of the rules (both networks, the blend, both orders) gives
+  another plausible seed;
+- the rules did not read an uncertain seed on a complete layout: their
+  uncertainty is then about the words themselves, which reading them again
+  does not remove (a layout the rules found incomplete, with text left out or
+  a card too small in the photo, or read as an invalid seed, may be read
+  anew);
+- no word read by the rules with a probability of at least 0.9 differs;
+- the detector reading itself is complete: no crop goes out of the photo, the
+  card covers at least 8 % of it, the list does not reach its edge, and at
+  most one detected word lies outside the crops (another card of a sheet, the
+  cut column of a 24-word card, a word written above its line).
+
+Otherwise every word is marked uncertain. When the rules read an uncertain
+seed on a complete layout, the detector is not run at all.
+
 On a blurred photo of a card, the printed lines are spread out and lighter;
 when no card candidate shows half of its lines, they are looked for again
 with a lower contrast (3 gray levels instead of 6), which never turns a list
@@ -197,8 +232,8 @@ on).
 
 ## C library
 
-The network, the dictionary decoding and the flood fill of the card search
-exist only in C, in `native/handwriting.c`: there is no Python fallback,
+The networks, the dictionary decoding, the flood fill of the card search and
+the connected components of the detector maps exist only in C, in `native/handwriting.c`: there is no Python fallback,
 which would be 4 to 7 times slower on a Pi Zero (35 s for a card, 45 s for a
 list) and would hide a library left unbuilt. `native/__init__.py` loads
 `libhandwriting.so` from the same directory with `ctypes`; if it is missing,
@@ -251,6 +286,14 @@ network, on IEEE single precision without contraction (`-ffp-contract=off`)
 elsewhere, and on a constant table for the log-add of the decoder:
 `log1pf`/`expf` of glibc differ in the last bit between x86-64 and armhf on
 12 of its 1,025 values. Only the log-softmax calls `libm` (`expf`, `logf`).
+
+The word detector has its own vectors, `haller-1-detector-vectors.json`,
+written with its weights by `haller.detector_export` (Haller repository,
+branch `detector`): two synthetic images (a page of strokes, a card with
+printed lines) and the SHA-256 of the output maps of the C library, which
+`haller.detector_export` also compares with the integer reference in numpy
+(`haller.detector.integer_forward`). They pass on the Pi Zero (SMLAD) as on
+x86-64.
 
 Haller also checks, when it writes the vectors, that the quantized C model
 reads them as the float model it comes from (PyTorch): see the Haller
@@ -332,6 +375,23 @@ whole takes the same path as before; the registration only runs on a card
 found on part of its lines or on the frame of the photo (5 to 6 s more for
 the search on a Pi Zero, where a shifted reading used to take 21 s).
 
+The word detector was measured on the same photos (seeds valid and exact /
+exact / wrong but reported as valid; words read correctly), before and after:
+
+| Photos | Before | With the detector |
+|---|---|---|
+| 1 605 photos of the measurement above | 1 195 / 1 291 / 0 / 83.9 % | 1 231 / 1 370 / 0 / 90.9 % |
+| of which capitals (1 301) | 1 092 / 1 135 / 0 / 87.0 % | 1 116 / 1 191 / 0 / 93.3 % |
+| of which neat cursive (301) | 103 / 155 / 0 / 70.6 % | 115 / 178 / 0 / 80.8 % |
+| 1 167 badly framed photos (735 above and 432 others) | 420 / 520 / 2 / 50.5 % | 460 / 615 / 2 / 62.7 % |
+| 20 real photos taken by the device | 11 / 17 / 0 / 95.4 % | 11 / 17 / 0 / 95.8 % |
+
+The two wrong valid seeds of the badly framed photos are the same before and
+after (a list cut at the bottom, a card in strong perspective). On 920
+photos built to provoke wrong valid seeds (see the threat model), the
+detector adds none (24 before and after, the same photos). Its rules were set
+on 1 331 other simulated photos, apart from all these.
+
 ## Timings
 
 Measured on a Raspberry Pi Zero with the C library, the application stopped,
@@ -352,6 +412,14 @@ The calibrated analysis and the widening of the list crops add, on the same
 photos: nothing on the card, 0.4 s on the lists in capitals, 0.5 to 1.9 s on
 the lowercase and cursive lists (more readings of each word to combine).
 
+A photo read as valid by the rules takes the same time as before: the
+detector only runs when they find no seed, an invalid one, or an incomplete
+layout. It then adds 1.9 s for the network and the reading of the words
+again: on a Pi Zero, badly framed cards that the rules could not read took 5
+to 8 s to be refused and take 13 to 17 s to be read. The line numbers add
+nothing measurable: they are read from network outputs already computed,
+except for numbers cut off the line.
+
 The word models (1 s; numpy is already imported at startup by
 SeedSigner) are loaded while the photo is framed; the camera preview runs at
 3.3 instead of 5 frames per second during that second. The progress bar never
@@ -369,6 +437,7 @@ described in [How it works](#how-it-works):
 |---|---|---|
 | `haller-1-capitals.npz` | reads every photo; trained mostly on capitals | `2e9275f1acd0d347437e856160430e96a283ec484a48ab96a2ea1ca91531fe14` |
 | `haller-1-lowercase.npz` | second reading; more lowercase and cursive writing | `5d340b354ced032992cb474f03bcc0b063f24ee8e1446d2953203b778652e509` |
+| `haller-1-detector.npz` | word detector, when the rules find no valid seed | `bcda59a220e52979139f44a634a0946dd9d4fe72cd4b246ee23edc6437964aa4` |
 
 They are produced, from scratch and reproducibly, by the separate
 [Haller](https://github.com/pizza-bitcoiner/haller) repository (tag
@@ -395,6 +464,10 @@ Training data of these weights:
   included here.
 - The BIP39 English word list, and the BIP39 lists of the other Latin-script
   languages (accents removed) as non-target words.
+- Word detector only: simulated photos of cards and lists (the same fonts and
+  EMNIST letters, laid out on paper and photographed with framing defects:
+  cut, close, far, turned, in perspective, among other cards, under shadows)
+  and GNHK pages with their word boxes.
 - Second network only: more synthetic words in lowercase, written as whole
   words in cursive fonts, and BIP39 words written in the hands of GNHK writers
   by Emuru (Pippi et al., "Zero-Shot Styled Text Image Generation, but Make It

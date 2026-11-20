@@ -81,4 +81,48 @@ void hw_word_scores(const hw_trie *trie, const float *lp, int frames, float beam
  */
 void hw_border_connected(const uint8_t *mask, int h, int w, uint8_t *reached, int32_t *work);
 
+/*
+ * Word detector: fully convolutional network finding the words, the line
+ * numbers and the seed card on a photo reduced to HW_DETECTOR_WIDTH x
+ * HW_DETECTOR_HEIGHT (layout written by haller.detector.quantize).
+ *   e1-e4: conv 3x3, max 2x2 ; e5, e6: conv 3x3 ; e7: conv 3x3, max 2x2 ;
+ *   e8: conv 3x3 ; d4 = conv 3x3 (e6 + up(e8)) ; d3 = conv (e3 + up(d4)) ;
+ *   d2 = conv (e2 + up(d3)) ; d1 = conv (e1 + up(d2)) ; output conv 3x3 on d1
+ * where up() is a nearest upsampling by 2 and + a channel concatenation.
+ * Same arithmetic as the word network: layer i has int16 weights w[i]
+ * ([O][3][3][C]), int32 biases b[i], requantization multipliers m[i] and
+ * channels[i] outputs (multiples of 4, even sums of concatenated channels);
+ * the output layer has int16 weights wo and float scales so and biases bo.
+ */
+#define HW_DETECTOR_WIDTH 288
+#define HW_DETECTOR_HEIGHT 384
+#define HW_DETECTOR_LAYERS 12
+#define HW_DETECTOR_OUTPUTS 8
+
+typedef struct {
+    int channels[HW_DETECTOR_LAYERS];
+    const int16_t *w[HW_DETECTOR_LAYERS];
+    const int32_t *b[HW_DETECTOR_LAYERS];
+    const int32_t *m[HW_DETECTOR_LAYERS];
+    const int16_t *wo;
+    const float *so, *bo;
+} hw_detector;
+
+size_t hw_detector_work_size(const hw_detector *net);
+
+/*
+ * Output maps (HW_DETECTOR_OUTPUTS x HW_DETECTOR_HEIGHT / 2 x
+ * HW_DETECTOR_WIDTH / 2, channel-major) of the grayscale image img
+ * (HW_DETECTOR_HEIGHT x HW_DETECTOR_WIDTH, row-major).
+ * work: at least hw_detector_work_size() bytes, 4-byte aligned.
+ */
+void hw_detector_maps(const hw_detector *net, const uint8_t *img, void *work, float *out);
+
+/*
+ * 8-connected components of mask (h x w, nonzero: in): labels (h x w) set to
+ * 1..n in raster order of the first pixel of each component, 0 outside.
+ * work: at least h * w int32 values. Returns n.
+ */
+int hw_components(const uint8_t *mask, int h, int w, int32_t *labels, int32_t *work);
+
 #endif

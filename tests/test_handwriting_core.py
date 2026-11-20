@@ -66,6 +66,7 @@ def test_haller_1_weights():
     expected = {
         "haller-1-capitals.npz": "2e9275f1acd0d347437e856160430e96a283ec484a48ab96a2ea1ca91531fe14",
         "haller-1-lowercase.npz": "5d340b354ced032992cb474f03bcc0b063f24ee8e1446d2953203b778652e509",
+        "haller-1-detector.npz": "bcda59a220e52979139f44a634a0946dd9d4fe72cd4b246ee23edc6437964aa4",
     }
     for name, sha256 in expected.items():
         with open(os.path.join(os.path.dirname(MODEL_PATH), name), "rb") as f:
@@ -312,3 +313,56 @@ def test_numbered_order_votes():
     assert reader.numbered_order() is None
     reader.numbers = {k: None for k in range(12)}
     assert reader.numbered_order() is None
+
+
+
+def rendered_list(words: list[str]) -> Image.Image:
+    """ Photo of a list of words printed in capitals on a light sheet. """
+    font = ImageFont.truetype(FONT_PATH, 46)
+    image = Image.new("L", (1200, 1600), 90)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((150, 150, 1050, 1450), fill=225)
+    for i, word in enumerate(words):
+        draw.text((260, 220 + i * 95), word.upper(), fill=35, font=font)
+    return image
+
+
+
+def test_detector_finds_the_words_of_a_list():
+    """ The word detector finds the 12 lines of a list, which are then read. """
+    import random
+    from embit import bip39
+    from seedsigner.helpers.handwriting import Progress, detector, read_words
+    words = bip39.mnemonic_from_bytes(bytes(random.Random(3).getrandbits(8) for _ in range(16))).split()
+    layout = detector.find_words(rendered_list(words))
+    assert layout.kind == "list" and layout.count == 12 and layout.complete
+    analysis = read_words(layout, Progress(lambda p: None, 1.0)).analyze()
+    assert analysis.status == "valid" and analysis.mnemonic == words
+
+
+
+def test_detector_reading_must_agree_with_the_rules():
+    """ The detector cannot make valid a seed the rules read otherwise, or a page the rules read as uncertain on a
+        complete layout. """
+    import math
+    from embit import bip39
+    from seedsigner.helpers.handwriting import SeedReading, WordReading, agrees
+    seed = bip39.mnemonic_from_bytes(bytes(range(16))).split()
+    other = bip39.mnemonic_from_bytes(bytes(range(1, 17))).split()
+
+    def reading(words, p_top=1.0, complete=True):
+        """ Each word read first with probability p_top, then "zoo" """
+        second = math.log(1 / p_top - 1) if p_top < 1 else -50.0
+        return SeedReading("list", [WordReading(None, [(w, 0.0), ("zoo", second)]) for w in words], complete=complete)
+
+    detector_reading = reading(seed)
+    assert detector_reading.analyze().status == "valid"
+    assert agrees(detector_reading, None, [])                                 # the rules found no words
+    assert not agrees(detector_reading, reading(other, 0.5), [other])         # another plausible seed
+    assert not agrees(detector_reading, reading(seed, 0.6), [seed])           # same seed, complete layout
+    assert agrees(detector_reading, reading(seed, 0.6, complete=False), [seed])   # same seed, words left out
+    uncertain = reading(other, 0.3)
+    assert uncertain.analyze().status == "uncertain"
+    assert not agrees(detector_reading, uncertain, [])                       # uncertain on a complete layout
+    assert not agrees(detector_reading, reading(other[:1] + seed[1:], complete=False), [])  # a sure word differs
+    assert agrees(detector_reading, reading(other[:1] + seed[1:], 0.6, complete=False), [])  # an unsure one

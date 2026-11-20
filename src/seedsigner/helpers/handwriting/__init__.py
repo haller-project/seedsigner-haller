@@ -22,6 +22,7 @@ import numpy as np
 from PIL import Image
 
 from .checksum import Analysis, MIN_PLAUSIBLE_SEED, MIN_SEED_PROBABILITY
+from .decoder import number_probabilities
 from .page import RECTIFY_COSTS, SEARCH_COST, WordsNotFound, find_words
 from .preprocess import normalize_word
 from .word_model import MODEL_PATH
@@ -61,6 +62,16 @@ FIRST, LOWERCASE, BLEND = (1.0, 0.0), (0.0, 1.0), (BLEND_WEIGHT, 1 - BLEND_WEIGH
 # matches its accuracy within 1 % on capitals (2.6 would fit capitals best,
 # 1.7 cards and cursive).
 TEMPERATURES = {FIRST: 2.2, LOWERCASE: 2.2, BLEND: 2.2}
+
+# Line numbers written before the words of a list in two columns fix the
+# reading order: a number read with a probability of at least
+# NUMBER_PROBABILITY is a vote for the orders in which its word has that
+# position (words at the same position in every order do not vote). An order
+# with at least MIN_NUMBER_VOTES votes, the others having none, is the order
+# written. Read only when the order matters (more than one order gives a seed
+# that passes the checksum).
+NUMBER_PROBABILITY = 0.9
+MIN_NUMBER_VOTES = 3
 
 # Expected duration of the steps of a reading, in seconds on a Pi Zero (see
 # Progress): loading of the models, reading of a word by the first network
@@ -119,6 +130,7 @@ class SeedReading:
         self.complete = complete
         self.doubtful = set() if complete else set(range(len(words)))
         self.ambiguous_order = False
+        self.numbered = False
         self._last = None
 
 
@@ -129,6 +141,15 @@ class SeedReading:
         self.ambiguous_order = True
         self.doubtful = set(range(len(self.words)))
         self._last = None
+
+
+    def is_plausible(self) -> bool:
+        """
+            True if the seed of this reading passes the checksum with a
+            probability of at least MIN_PLAUSIBLE_SEED.
+        """
+        analysis = self.analyze()
+        return analysis.status != "invalid" and analysis.confidence >= MIN_PLAUSIBLE_SEED
 
 
     def analyze(self, confirmed: dict[int, str] = None) -> Analysis:
@@ -205,6 +226,8 @@ class LayoutReader:
         self.layout = layout
         self.inks = {}     # (k, variant): (crop, ink map or None)
         self.scores = {}   # (k, variant, model): word scores
+        self.log_probs = {}  # (k, variant, model): outputs of the network
+        self.numbers = {}  # k: (number, probability) or None
         self._alternative = []
 
 
@@ -232,7 +255,8 @@ class LayoutReader:
         if (k, variant, model) not in self.scores:
             first, decoder, lowercase = load_engine()
             network = lowercase if model else first
-            self.scores[(k, variant, model)] = decoder.scores(network.log_probs(ink))
+            self.log_probs[(k, variant, model)] = network.log_probs(ink)
+            self.scores[(k, variant, model)] = decoder.scores(self.log_probs[(k, variant, model)])
         return self.scores[(k, variant, model)]
 
 
@@ -261,6 +285,50 @@ class LayoutReader:
         scores = scores / TEMPERATURES[weights]
         best = np.argsort(-scores, kind="stable")[:CANDIDATES]
         return WordReading(crop, [(words[i], float(scores[i])) for i in best])
+
+
+
+    def number(self, k: int) -> tuple[int, float] | None:
+        """
+            Most probable number 1 to layout.count written before word k, read
+            by the first network, and its probability: on the number cut off
+            the line if any, else on the crop of the word (a number written
+            against the word is part of it). None if no ink is found.
+        """
+        if k not in self.numbers:
+            self.numbers[k] = None
+            crop = self.layout.number_crop(k) if self.layout.number_crop else None
+            if crop is not None:
+                ink = normalize_word(crop)
+                log_probs = None if ink is None else load_engine()[0].log_probs(ink)
+            else:
+                self.read(k, 0, FIRST)
+                log_probs = None if self.model_scores(k, 0, 0) is None else self.log_probs[(k, 0, 0)]
+            if log_probs is not None:
+                probabilities = number_probabilities(log_probs, self.layout.count)
+                best = int(np.argmax(probabilities))
+                self.numbers[k] = (best + 1, float(probabilities[best]))
+        return self.numbers[k]
+
+
+    def numbered_order(self) -> int | None:
+        """
+            Index in layout.orders of the order fixed by the line numbers, or
+            None (see NUMBER_PROBABILITY).
+        """
+        orders = self.layout.orders
+        votes = [0] * len(orders)
+        for k in range(self.layout.count):
+            number = self.number(k)
+            positions = [order.index(k) + 1 for order in orders]
+            if number is None or number[1] < NUMBER_PROBABILITY or len(set(positions)) == 1:
+                continue
+            for i, position in enumerate(positions):
+                votes[i] += position == number[0]
+        best = max(range(len(orders)), key=lambda i: votes[i])
+        if votes[best] >= MIN_NUMBER_VOTES and all(v == 0 for i, v in enumerate(votes) if i != best):
+            return best
+        return None
 
 
 
@@ -315,16 +383,20 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
     # Two columns of equal length: column by column, or row by row if only
     # that order gives a valid seed. A permutation of a seed passes the
     # checksum once in 16 for 12 words: when both orders give a plausible
-    # seed, the order written is unknown.
-    if len(layout.orders) > 1:
-        readings = [reading] + [seed_reading(order) for order in layout.orders[1:]]
-        for alternative in readings[1:]:
-            if reading.analyze().status == "invalid" and alternative.analyze().status != "invalid":
-                reading = alternative
-        plausible = [r for r in readings
-                     if r.analyze().status != "invalid" and r.analyze().confidence >= MIN_PLAUSIBLE_SEED]
-        if len(plausible) > 1:
-            reading.mark_ambiguous_order()
+    # seed, the order written is unknown, unless the line numbers tell it.
+    readings = [reading] + [seed_reading(order) for order in layout.orders[1:]]
+    if any(r.analyze().status != "invalid" for r in readings[1:]):
+        order = reader.numbered_order()
+        if order is not None:
+            reading = readings[order]
+            reading.numbered = True
+            return reading
+    seeds = [r.analyze().mnemonic for r in readings if r.is_plausible()]
+    for alternative in readings[1:]:
+        if reading.analyze().status == "invalid" and alternative.analyze().status != "invalid":
+            reading = alternative
+    if len(seeds) > 1:
+        reading.mark_ambiguous_order()
     return reading
 
 

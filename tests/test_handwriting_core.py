@@ -96,7 +96,7 @@ def fake_layout(words: list[str]):
     crops = [word_crop(w) for w in words]
     return types.SimpleNamespace(kind="list", count=len(words), orders=[list(range(len(words)))], variants=1,
                                  crop=lambda k, variant=0: crops[k] if variant == 0 else None, alternative=None,
-                                 complete=True)
+                                 complete=True, number_crop=None)
 
 
 
@@ -253,11 +253,62 @@ def test_two_column_orders_both_valid():
             break
     layout = types.SimpleNamespace(kind="list", count=12, orders=[list(range(12))] + rows, variants=1, complete=True)
     reader = types.SimpleNamespace(layout=layout, read=lambda k, variant, weights: WordReading(
-        None, [(seed[k], 0.0)] + [(w, -30.0) for w in ("abandon", "ability", "able")]))
+        None, [(seed[k], 0.0)] + [(w, -30.0) for w in ("abandon", "ability", "able")]), numbered_order=lambda: None)
     reading = read_layout(reader, Progress(lambda p: None, 1.0), FIRST, 0.5)
     analysis = reading.analyze()
     assert reading.ambiguous_order and analysis.status == "uncertain" and len(analysis.uncertain) == 12
 
+    # the line numbers tell the order written: no ambiguity
+    for order in (0, 1):
+        reader.numbered_order = lambda order=order: order
+        reading = read_layout(reader, Progress(lambda p: None, 1.0), FIRST, 0.5)
+        assert reading.numbered and not reading.ambiguous_order and reading.analyze().status == "valid"
+        assert reading.analyze().mnemonic == [seed[i] for i in layout.orders[order]]
+    reader.numbered_order = lambda: None
+
     layout.orders = [list(range(12))]
     reading = read_layout(reader, Progress(lambda p: None, 1.0), FIRST, 0.5)
     assert not reading.ambiguous_order and reading.analyze().status == "valid"
+
+
+
+def test_number_probabilities():
+    """ The digits of a line number are read, whatever punctuation follows them. """
+    from seedsigner.helpers.handwriting.decoder import number_probabilities
+    def frames(text):
+        out = [0]
+        for c in text:
+            out += [ALPHABET.index(c) + 1 if c in ALPHABET else 0, 0]
+        return out
+    for text, number in (("12", 12), ("1", 1), ("7)", 7), ("11", 11), ("3j", 3)):
+        p = number_probabilities(perfect_log_probs(frames(text)), 24)
+        assert max(range(24), key=lambda i: p[i]) + 1 == number and p[number - 1] > 0.9
+    # digits that are no number of the list: no number is probable
+    assert max(number_probabilities(perfect_log_probs(frames("71")), 24)) < 0.05
+    assert max(number_probabilities(perfect_log_probs(frames("ab")), 24)) < 0.05
+
+
+
+def test_numbered_order_votes():
+    """ Numbers read with assurance choose the order in which their words have that position, if no other
+        order gets a vote. """
+    from seedsigner.helpers.handwriting import LayoutReader
+    columns, rows = list(range(12)), [i for r in range(6) for i in (r, 6 + r)]
+    layout = types.SimpleNamespace(count=12, orders=[columns, rows], number_crop=None)
+    reader = LayoutReader(layout)
+
+    def written(order, k):
+        return order.index(k) + 1
+
+    reader.numbers = {k: (written(rows, k), 0.99) for k in range(12)}
+    assert reader.numbered_order() == 1
+    reader.numbers = {k: (written(columns, k), 0.99) for k in range(12)}
+    assert reader.numbered_order() == 0
+    # one number of the other order: no decision
+    reader.numbers[3] = (written(rows, 3), 0.99)
+    assert reader.numbered_order() is None
+    # too few numbers read with assurance (the first one is the same in both orders)
+    reader.numbers = {k: (written(rows, k), 0.99 if k < 3 else 0.5) for k in range(12)}
+    assert reader.numbered_order() is None
+    reader.numbers = {k: None for k in range(12)}
+    assert reader.numbered_order() is None

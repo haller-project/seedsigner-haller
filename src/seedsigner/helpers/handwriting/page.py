@@ -141,9 +141,11 @@ class WordLayout:
         complete: False if text is left out of the crops, so that the number
             of words is uncertain, or if the card is too small in the photo:
             no word is then certain unless confirmed
+        number_crop: None, or a function returning the grayscale crop of the
+            number written before word k, or None if none was found
     """
     def __init__(self, kind: str, count: int, orders: list[list[int]], variants: int, crop, outline,
-                 alternative=None, complete: bool = True):
+                 alternative=None, complete: bool = True, number_crop=None):
         self.kind = kind
         self.count = count
         self.orders = orders
@@ -152,6 +154,7 @@ class WordLayout:
         self._outline = outline
         self.alternative = alternative
         self.complete = complete
+        self.number_crop = number_crop
 
 
     def crop(self, k: int, variant: int = 0) -> Image.Image | None:
@@ -1583,37 +1586,44 @@ def list_layout(photo: Image.Image, half: Image.Image, step=no_step) -> WordLayo
     count = sum(len(c) for c in columns)
     if count not in SEED_LENGTHS:
         raise WordsNotFound(f"{count} lines found", at_edge=at_edge, line_count=count)
-    boxes, widened = [], []
-    for column in columns:  # numbers removed column by column (each column has its own alignment)
+    boxes, widened, numbers = [], [], []
+    for column in columns:  # numbers cut off column by column (each column has its own alignment)
         lines = []
         for b in column:
             lines.append(widen_line(page, b))
             step(NUMBER_COST)
         widened.append([b for b, _ in lines])
-        boxes += [(x, b[1], b[2], b[3]) if x is not None and b[0] < x < b[2] else b
-                  for (b, _), x in zip(lines, word_starts([b for b, _ in lines], [m for _, m in lines]))]
+        for (b, _), x in zip(lines, word_starts([b for b, _ in lines], [m for _, m in lines])):
+            cut = x is not None and b[0] < x < b[2]
+            boxes.append((x, b[1], b[2], b[3]) if cut else b)
+            numbers.append((b[0], b[1], x, b[3]) if cut else None)
     complete = not unread_text(ink, widened)
 
     f = int(round(photo.width / half.width))
     matrix = rotation_matrix(angle, half.size) if angle else None
     fill = int(np.median(np.asarray(photo.reduce(16)))) if angle else 255
 
-    def crop_coefficients(k):
-        """ (x0, y0, x1, y1) of crop k on the straightened photo, affine coefficients to the photo """
-        x0, y0, x1, y1 = (int(round(v * f)) for v in boxes[k])
+    def crop_coefficients(box):
+        """ (x0, y0, x1, y1) of a box of the half page on the straightened photo, affine coefficients to the photo """
+        x0, y0, x1, y1 = (int(round(v * f)) for v in box)
         a, b, c, d, e, g = matrix or (1, 0, 0, 0, 1, 0)
         return (x0, y0, x1, y1), (a, b, a * x0 + b * y0 + f * c, d, e, d * x0 + e * y0 + f * g)
 
-    def crop(k, variant):
-        if variant:
-            return None
-        (x0, y0, x1, y1), coefficients = crop_coefficients(k)
+    def cut(box):
+        (x0, y0, x1, y1), coefficients = crop_coefficients(box)
         if matrix is None:
             return photo.crop((x0, y0, x1, y1))
         return photo.transform((x1 - x0, y1 - y0), Image.AFFINE, coefficients, Image.BILINEAR, fillcolor=fill)
 
+    def crop(k, variant):
+        return None if variant else cut(boxes[k])
+
+    def number_crop(k):
+        return cut(numbers[k]) if numbers[k] else None
+
     def outline(k):
-        (x0, y0, x1, y1), (a, b, c, d, e, g) = crop_coefficients(k)
+        (x0, y0, x1, y1), (a, b, c, d, e, g) = crop_coefficients(boxes[k])
         return [(a * u + b * v + c, d * u + e * v + g) for u, v in ((0, 0), (x1 - x0, 0), (x1 - x0, y1 - y0), (0, y1 - y0))]
 
-    return WordLayout("list", count, reading_orders(len(columns), count), 1, crop, outline, complete=complete)
+    return WordLayout("list", count, reading_orders(len(columns), count), 1, crop, outline, complete=complete,
+                      number_crop=number_crop)

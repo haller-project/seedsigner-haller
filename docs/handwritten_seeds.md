@@ -60,7 +60,7 @@ The engine is `seedsigner.helpers.handwriting`:
 | `page.py` | finds the card (corners, registration on its printed lines, rectification) or the lines and columns of a list (rotation, line profiles, word numbers), and cuts out one crop per word; a line box is widened while ink lies just beyond its sides (a letter set apart from the rest of the word, a faint stroke) |
 | `preprocess.py` | turns a word crop into an ink map 32 pixels high |
 | `word_model.py` | small convolutional network (about 160 000 parameters, CTC), run in 16-bit integers; two sets of weights, see [The Haller-1 model](#the-haller-1-model) |
-| `decoder.py` | log-likelihood of each of the 2 048 BIP39 words (prefix tree, beam pruning); a line number before the word is accepted |
+| `decoder.py` | log-likelihood of each of the 2 048 BIP39 words (prefix tree, beam pruning); a line number before the word is accepted; probability of each line number |
 | `checksum.py` | combinations of plausible words, BIP39 checksum, probability of the seed and of each word given the checksum, uncertain words |
 | `native/handwriting.c` | network, decoder and the flood fill of the card search in portable C (no allocation, no CPython), used through `ctypes`; required, see [C library](#c-library) |
 
@@ -119,6 +119,26 @@ read with high probability: when both orders give a plausible seed (valid,
 probability at least 0.1), the order written is unknown. Every word is then
 marked uncertain, and the status notice asks to check the order of every word
 against the paper.
+
+Line numbers, when they are written, tell the order. They are read only when
+the order matters (more than one order passes the checksum), by the first
+network, on the number cut off the line or, when it is written against the
+word ("7)WORD"), on the crop of the word itself, whose network outputs are
+already computed. The probability of each number 1 to the number of words is
+that of the digits read being exactly its digits, letters, punctuation and
+blanks aside (`decoder.number_probabilities`): a "10" read as "1o" gives no
+probable number. A number read with a probability of at least 0.9 votes for
+the orders in which its word has that position (the first and last words,
+at the same position in both orders, do not vote). An order with at least
+three votes, the other having none, is the order written: its reading is
+kept, even if it does not pass the checksum, and the words are not marked for
+the order. Otherwise nothing changes. On 317 simulated two-column lists kept
+apart for this setting (row by row or column by column, numbers "1.", "1)"
+or "1", written apart or against the word), the order was told on 218, and
+never wrongly. On the 40 test lists written row by row with numbers, which
+were all uncertain, 29 are now valid and exact; the other photos measured do
+not change (1 605 photos: 1 195 valid and exact instead of 1 189, no wrong
+seed reported as valid).
 
 On a blurred photo of a card, the printed lines are spread out and lighter;
 when no card candidate shows half of its lines, they are looked for again

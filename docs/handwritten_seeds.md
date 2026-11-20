@@ -345,6 +345,10 @@ python -m haller.vectors src/seedsigner/resources/handwriting/haller-N-capitals.
     --float MODEL_FLOAT.npz
 ```
 
+For Haller-1, the float models, the evaluation strips and the commands that
+write these vectors again byte for byte are in `recipes/haller-1` of the
+Haller repository.
+
 ### Tests in the CI (proposal)
 
 The engine tests that need numpy (`tests/test_handwriting_core.py`: page

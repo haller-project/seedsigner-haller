@@ -366,3 +366,55 @@ def test_detector_reading_must_agree_with_the_rules():
     assert not agrees(detector_reading, uncertain, [])                       # uncertain on a complete layout
     assert not agrees(detector_reading, reading(other[:1] + seed[1:], complete=False), [])  # a sure word differs
     assert agrees(detector_reading, reading(other[:1] + seed[1:], 0.6, complete=False), [])  # an unsure one
+
+
+
+def tight_two_column_list(words: list[str]) -> Image.Image:
+    """
+        Photo of a numbered list of two columns printed in capitals, the
+        number of each word of the right column a third of a text height after
+        the longest word of the left column: no empty corridor between them.
+    """
+    font = ImageFont.truetype(FONT_PATH, 46)
+    image = Image.new("L", (1400, 1200), 90)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((100, 100, 1300, 1100), fill=225)
+    rows = len(words) // 2
+    left = [f"{i + 1} {w.upper()}" for i, w in enumerate(words[:rows])]
+    right_x = 180 + max(draw.textlength(t, font=font) for t in left) + 12
+    for i in range(rows):
+        draw.text((180, 230 + i * 120), left[i], fill=35, font=font)
+        draw.text((right_x, 230 + i * 120), f"{rows + i + 1} {words[rows + i].upper()}", fill=35, font=font)
+    return image
+
+
+
+def test_aligned_columns_of_a_tight_list():
+    """ Two columns with no empty corridor between them: the rules find one line per row; cut where the right
+    column starts, the rows give the words of the seed. """
+    import random
+    from embit import bip39
+    from seedsigner.helpers.handwriting import page, read_seed
+    words = bip39.mnemonic_from_bytes(bytes(random.Random(5).getrandbits(8) for _ in range(16))).split()
+    photo = tight_two_column_list(words)
+    half = photo.reduce(2)
+    ink = page.ink_mask(half)
+    assert sum(len(c) for c in page.find_lines(half, ink)) == 6
+    columns = page.aligned_columns(half, ink)
+    assert [len(c) for c in columns] == [6, 6]
+    for left, right in zip(*columns):
+        assert left[2] <= right[0] and abs(left[1] - right[1]) <= 2
+    with pytest.raises(page.WordsNotFound):
+        page.find_words(photo)
+    layout = page.find_aligned_words(photo)
+    assert layout.kind == "list" and layout.count == 12
+    analysis = read_seed(photo).analyze()
+    assert analysis.mnemonic == words and analysis.status in ("valid", "uncertain")
+
+
+
+def test_aligned_columns_not_found_in_one_column():
+    """ A list of one column whose words are cut nowhere: no aligned start leaves enough text on both sides. """
+    from seedsigner.helpers.handwriting import page
+    half = rendered_list(["attitude", "surface", "betray", "supply", "valve", "erupt"]).reduce(2)
+    assert page.aligned_columns(half, page.ink_mask(half)) is None

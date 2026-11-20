@@ -92,6 +92,11 @@ WIDEN_STEP = 0.4             # a line box with ink within this share of the text
 MAX_WIDENING = 4.0           # up to this many text heights
 UNREAD_LINE = (1.5, 0.3)     # ink left out of the line boxes, at least this many line heights wide and this share
                              # of the ink of a median line: the number of lines is uncertain
+# Two columns too close for an empty corridor (see aligned_columns), in line heights
+SPLIT_GAP = 0.15             # empty width between the columns on a line
+SPLIT_ALIGNMENT = 0.5        # largest distance between the start of the right column on a line and the common start
+MIN_SPLIT_LINES = 0.75       # share of the lines with an empty gap at the common start
+MIN_COLUMN_WIDTH = 2.0       # median width of the text of each column, numbers included
 
 # Expected duration of the steps of the search, in seconds on a Pi Zero, reported
 # to `step(cost)` as they are done for a steady progress bar. SEARCH_COST is the
@@ -104,6 +109,7 @@ PAGE_ANGLE_COST = 0.45
 ROTATION_COST = 0.6
 LINES_COST = 0.3
 NUMBER_COST = 0.085          # per line
+LIST_SEARCH_COST = INK_MASK_COST + PAGE_ANGLE_COST + ROTATION_COST + LINES_COST + 12 * NUMBER_COST
 SEARCH_COST = 8 * CARD_MASK_COST + CARD_LINES_COST + INK_MASK_COST + PAGE_ANGLE_COST + ROTATION_COST + LINES_COST \
     + 12 * NUMBER_COST
 
@@ -223,6 +229,16 @@ def locate(image: Image.Image, half: Image.Image, step=no_step) -> WordLayout:
         layout.complete = bool(quad_area(quad) >= MIN_SURE_CARD_AREA * half.width * half.height)
         return layout
     return list_layout(image, half, step)
+
+
+
+def find_aligned_words(image: Image.Image, step=no_step) -> WordLayout:
+    """
+        Words of a list of two columns too close for find_words to tell apart
+        (see aligned_columns), on `image` as for find_words. Raises
+        WordsNotFound if no such list is found.
+    """
+    return list_layout(image, image.reduce(2), step, aligned=True)
 
 
 
@@ -1463,6 +1479,97 @@ def segments(m: np.ndarray) -> tuple[list[list[int]], tuple[int, int]]:
     return out, (y0, y1)
 
 
+def aligned_columns(photo: Image.Image, ink: np.ndarray) -> list[list[tuple[int, int, int, int]]] | None:
+    """
+        Line boxes of a list of two columns written so close together that no
+        empty corridor separates them (the number of a word of the right column
+        written against the end of a long word of the left column), in `photo`
+        coordinates; None if the ink does not look like such a list.
+        The lines are found across both columns, and each line is cut where the
+        right column starts. The start is common to the lines: the abscissa
+        where the lines with an empty gap of at least SPLIT_GAP heights ending
+        within SPLIT_ALIGNMENT heights of it (at least MIN_SPLIT_LINES of them)
+        have the widest gaps in total, leaving a median of at least
+        MIN_COLUMN_WIDTH heights of text on each side. A line without such a
+        gap is cut at its lightest column near the start. Every line holds
+        text on both sides, except a last line shorter than the others; the
+        number of words must be a valid seed length. The margins of the boxes
+        stop in the middle of the gap.
+    """
+    mh, mv = LIST_MARGINS
+    r = LIST_REDUCTION
+    for method in (lambda m: line_peaks(m, 0.25), line_blocks,
+                   lambda m: line_peaks(m, 0.15), lambda m: line_peaks(m, 0.4)):
+        lines = drop_stray_lines(method(ink))
+        if len(lines) < 2:
+            continue
+        h = float(np.median([y1 - y0 for y0, y1, _, _ in lines]))
+        # each line spans the whole list: its own main group may be one column only
+        xa, xb = main_group(ink[lines[0][0]:lines[-1][1]].sum(0), 1.5 * h)
+        spans = [np.nonzero(ink[y0:y1, xa:xb].sum(0))[0] for y0, y1, _, _ in lines]
+        lines = [(y0, y1, xa + int(x[0]), xa + int(x[-1]) + 1) for (y0, y1, _, _), x in zip(lines, spans) if len(x)]
+        if len(lines) < 2:
+            continue
+        profiles = [ink[y0:y1, x0:x1].sum(0) for y0, y1, x0, x1 in lines]
+        gaps = []
+        for (_, _, x0, _), profile in zip(lines, profiles):
+            empty = np.append(profile == 0, False)
+            line_gaps, start = [], None
+            for x, e in enumerate(empty):
+                if e and start is None:
+                    start = x
+                elif not e and start is not None:
+                    if x - start >= SPLIT_GAP * h and start > 0 and x < len(profile):
+                        line_gaps.append((x0 + start, x0 + x))
+                    start = None
+            gaps.append(line_gaps)
+        best = None
+        for start in sorted({g1 for line_gaps in gaps for _, g1 in line_gaps}):
+            cuts = []
+            for (_, _, x0, x1), profile, line_gaps in zip(lines, profiles, gaps):
+                near = [g for g in line_gaps if abs(g[1] - start) <= SPLIT_ALIGNMENT * h]
+                if near:
+                    cuts.append(max(near, key=lambda g: g[1] - g[0]))
+                elif x1 <= start:
+                    cuts.append(None)  # nothing in the right column
+                else:
+                    a, b = max(x0 + 1, int(start - SPLIT_ALIGNMENT * h)), min(x1 - 1, int(start + SPLIT_ALIGNMENT * h) + 1)
+                    if b <= a:
+                        break  # nothing in the left column
+                    c = a + int(np.argmin(profile[a - x0:b - x0]))
+                    cuts.append((c, c))
+            if len(cuts) < len(lines):
+                continue
+            with_gap = sum(c is not None and c[1] > c[0] for c in cuts)
+            if with_gap < MIN_SPLIT_LINES * len(lines) or any(c is None for c in cuts[:-1]):
+                continue
+            left = [c[0] - x0 for c, (_, _, x0, _) in zip(cuts, lines) if c]
+            right = [x1 - c[1] for c, (_, _, _, x1) in zip(cuts, lines) if c]
+            if min(np.median(left), np.median(right)) < MIN_COLUMN_WIDTH * h:
+                continue
+            total = sum(c[1] - c[0] for c in cuts if c)
+            if best is None or total > best[0]:
+                best = (total, cuts)
+        if best is None:
+            continue
+        cuts = best[1]
+        count = len(lines) + sum(c is not None for c in cuts)
+        if count not in SEED_LENGTHS:
+            continue
+        columns = [[], []]
+        for (y0, y1, x0, x1), c in zip(lines, cuts):
+            m = mh * (y1 - y0)
+            top, bottom = max(0, int((y0 - mv * (y1 - y0)) * r)), min(photo.height, int((y1 + mv * (y1 - y0)) * r))
+            if c is None:
+                columns[0].append((max(0, int((x0 - m) * r)), top, min(photo.width, int((x1 + m) * r)), bottom))
+                continue
+            middle = (c[0] + c[1]) / 2
+            columns[0].append((max(0, int((x0 - m) * r)), top, int(min(c[0] + m, middle) * r), bottom))
+            columns[1].append((int(max(c[1] - m, middle) * r), top, min(photo.width, int((x1 + m) * r)), bottom))
+        return columns
+    return None
+
+
 def line_mask(photo: Image.Image, box: tuple[int, int, int, int]) -> np.ndarray:
     """
         Ink mask of the crop `box` of a line, ruled lines and long strokes removed.
@@ -1561,10 +1668,12 @@ def reading_orders(columns: int, count: int) -> list[list[int]]:
     return orders
 
 
-def list_layout(photo: Image.Image, half: Image.Image, step=no_step) -> WordLayout:
+def list_layout(photo: Image.Image, half: Image.Image, step=no_step, aligned: bool = False) -> WordLayout:
     """
         Free list: page straightened, lines and numbers found on `half`; crops
-        cut from `photo` with the same rotation.
+        cut from `photo` with the same rotation. `aligned`: the lines are those
+        of two close columns cut at the start of the right one (see
+        aligned_columns).
     """
     ink = ink_mask(half)
     step(INK_MASK_COST)
@@ -1581,7 +1690,10 @@ def list_layout(photo: Image.Image, half: Image.Image, step=no_step) -> WordLayo
         else:
             angle = 0.0
         step(ROTATION_COST)
-    columns = find_lines(page, ink) if ink is not None else []
+    if ink is None:
+        columns = []
+    else:
+        columns = (aligned_columns(page, ink) or []) if aligned else find_lines(page, ink)
     step(LINES_COST)
     count = sum(len(c) for c in columns)
     if count not in SEED_LENGTHS:
@@ -1590,7 +1702,8 @@ def list_layout(photo: Image.Image, half: Image.Image, step=no_step) -> WordLayo
     for column in columns:  # numbers cut off column by column (each column has its own alignment)
         lines = []
         for b in column:
-            lines.append(widen_line(page, b))
+            # a box cut at the start of the right column is not widened into its neighbor
+            lines.append((b, line_mask(page, b)) if aligned else widen_line(page, b))
             step(NUMBER_COST)
         widened.append([b for b, _ in lines])
         for (b, _), x in zip(lines, word_starts([b for b, _ in lines], [m for _, m in lines])):

@@ -13,8 +13,10 @@
     Haller-1, made of two sets of weights: a seed that is not valid with the
     first one is read again by the second one, trained with more lowercase and
     cursive writing. A photo on which the rules of page.py find no valid seed
-    is searched again by the word detector of Haller-1 (detector.py). The
-    result must always be reviewed by the user against the paper.
+    is searched again by the word detector of Haller-1 (detector.py), then,
+    if no list was found, as a list of two columns written too close together
+    (page.find_aligned_words). The result must always be reviewed by the user
+    against the paper.
 """
 import math
 import threading
@@ -25,7 +27,7 @@ from PIL import Image
 from . import detector
 from .checksum import Analysis, MIN_PLAUSIBLE_SEED, MIN_SEED_PROBABILITY
 from .decoder import number_probabilities
-from .page import RECTIFY_COSTS, SEARCH_COST, WordsNotFound, find_words
+from .page import LIST_SEARCH_COST, RECTIFY_COSTS, SEARCH_COST, WordsNotFound, find_aligned_words, find_words
 from .preprocess import normalize_word
 from .word_model import MODEL_PATH
 
@@ -81,6 +83,13 @@ MIN_NUMBER_VOTES = 3
 # agrees). A word read by the rules with a probability of at least
 # AGREEMENT_PROBABILITY must be the same.
 AGREEMENT_PROBABILITY = 0.9
+
+# A list of two columns too close for the rules to tell apart is cut where the
+# right column starts (page.find_aligned_words), when neither the rules nor the
+# detector give a valid seed. Cutting a page that is not such a list gives
+# random words: the reading is kept only if its seed probability reaches
+# ALIGNED_MIN_SEED_PROBABILITY (1e-9 to 1e-16 for random words).
+ALIGNED_MIN_SEED_PROBABILITY = 1e-4
 
 # Expected duration of the steps of a reading, in seconds on a Pi Zero (see
 # Progress): loading of the models, reading of a word by the first network
@@ -524,6 +533,7 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
         progress.step(LOAD_COST)
     gray = image.convert("L")
     plausible = []
+    not_found = None
     try:
         layout = find_words(gray, progress.step)
     except WordsNotFound as e:
@@ -550,6 +560,22 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             analysis = other.analyze()
             if reading is None or (STATUS_RANK[analysis.status], analysis.confidence) \
                     > (STATUS_RANK[reading.analyze().status], reading.analyze().confidence):
+                reading = other
+
+    # No valid seed and no layout found by the rules on a list: its columns may be too close to be told apart
+    if not_found is not None and not not_found.card and (reading is None or reading.analyze().status != "valid"):
+        progress.expect(LIST_SEARCH_COST + 12 * (WORD_COST + OTHER_WORD_COST))
+        try:
+            layout = find_aligned_words(gray, progress.step)
+        except WordsNotFound:
+            layout = None
+        if layout is not None:
+            progress.expect(reading_cost(layout))
+            other = read_words(layout, progress, on_word)
+            analysis = other.analyze()
+            if analysis.confidence >= ALIGNED_MIN_SEED_PROBABILITY and (reading is None or (
+                    STATUS_RANK[analysis.status], analysis.confidence)
+                    > (STATUS_RANK[reading.analyze().status], reading.analyze().confidence)):
                 reading = other
     if reading is None:
         raise not_found

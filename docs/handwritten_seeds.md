@@ -112,6 +112,14 @@ is passed by chance by the other words: every word is then marked uncertain.
 So it is when text is left out of the crops of a list (a missed line, two
 columns read as one): the number of words is then uncertain.
 
+A list in two columns of equal length is read column by column, or row by
+row when only that order gives a valid seed. A permutation of a seed passes
+the checksum once in 16 for 12 words (once in 256 for 24), with every word
+read with high probability: when both orders give a plausible seed (valid,
+probability at least 0.1), the order written is unknown. Every word is then
+marked uncertain, and the status notice asks to check the order of every word
+against the paper.
+
 On a blurred photo of a card, the printed lines are spread out and lighter;
 when no card candidate shows half of its lines, they are looked for again
 with a lower contrast (3 gray levels instead of 6), which never turns a list

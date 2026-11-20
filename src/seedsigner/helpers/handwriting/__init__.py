@@ -21,7 +21,7 @@ import threading
 import numpy as np
 from PIL import Image
 
-from .checksum import Analysis, MIN_SEED_PROBABILITY
+from .checksum import Analysis, MIN_PLAUSIBLE_SEED, MIN_SEED_PROBABILITY
 from .page import RECTIFY_COSTS, SEARCH_COST, WordsNotFound, find_words
 from .preprocess import normalize_word
 from .word_model import MODEL_PATH
@@ -118,6 +118,16 @@ class SeedReading:
         self.min_seed_probability = min_seed_probability
         self.complete = complete
         self.doubtful = set() if complete else set(range(len(words)))
+        self.ambiguous_order = False
+        self._last = None
+
+
+    def mark_ambiguous_order(self):
+        """
+            The words may be in another order: none is certain unless confirmed.
+        """
+        self.ambiguous_order = True
+        self.doubtful = set(range(len(self.words)))
         self._last = None
 
 
@@ -303,12 +313,18 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
                 reading = seed_reading(range(layout.count))
 
     # Two columns of equal length: column by column, or row by row if only
-    # that order gives a valid seed
-    for order in layout.orders[1:]:
-        if reading.analyze().status == "invalid":
-            alternative = seed_reading(order)
-            if alternative.analyze().status != "invalid":
+    # that order gives a valid seed. A permutation of a seed passes the
+    # checksum once in 16 for 12 words: when both orders give a plausible
+    # seed, the order written is unknown.
+    if len(layout.orders) > 1:
+        readings = [reading] + [seed_reading(order) for order in layout.orders[1:]]
+        for alternative in readings[1:]:
+            if reading.analyze().status == "invalid" and alternative.analyze().status != "invalid":
                 reading = alternative
+        plausible = [r for r in readings
+                     if r.analyze().status != "invalid" and r.analyze().confidence >= MIN_PLAUSIBLE_SEED]
+        if len(plausible) > 1:
+            reading.mark_ambiguous_order()
     return reading
 
 

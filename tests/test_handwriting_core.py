@@ -236,3 +236,28 @@ def test_right_column_of_a_24_word_card():
     for (_, x12, y12), (_, x24, y24) in zip(CARD_LINES["card12"], CARD_LINES["card24"][12:]):
         assert np.allclose(apply_homography(to_photo12, [(x12, y12)]), apply_homography(to_photo24, [(x24, y24)]),
                            atol=1e-6)
+
+
+
+def test_two_column_orders_both_valid():
+    """ when the seed and its row by row permutation both pass the checksum, no word is certain """
+    import random
+    from seedsigner.helpers.handwriting import FIRST, Progress, WordReading, read_layout
+    from seedsigner.helpers.handwriting.checksum import checksum_ok
+    from embit import bip39
+    rows = [[i for r in range(6) for i in (r, 6 + r)]]
+    rng = random.Random(4)
+    while True:
+        seed = bip39.mnemonic_from_bytes(bytes(rng.getrandbits(8) for _ in range(16))).split()
+        if checksum_ok([seed[i] for i in rows[0]]):
+            break
+    layout = types.SimpleNamespace(kind="list", count=12, orders=[list(range(12))] + rows, variants=1, complete=True)
+    reader = types.SimpleNamespace(layout=layout, read=lambda k, variant, weights: WordReading(
+        None, [(seed[k], 0.0)] + [(w, -30.0) for w in ("abandon", "ability", "able")]))
+    reading = read_layout(reader, Progress(lambda p: None, 1.0), FIRST, 0.5)
+    analysis = reading.analyze()
+    assert reading.ambiguous_order and analysis.status == "uncertain" and len(analysis.uncertain) == 12
+
+    layout.orders = [list(range(12))]
+    reading = read_layout(reader, Progress(lambda p: None, 1.0), FIRST, 0.5)
+    assert not reading.ambiguous_order and reading.analyze().status == "valid"

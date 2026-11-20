@@ -191,7 +191,11 @@ class HandwrittenStatusView(View):
                 # TRANSLATOR_NOTE: Inserts the number of uncertain words (e.g. "Words to check: 2")
                 status_headline = _("Words to check: {}").format(len(analysis.uncertain))
                 status_color = GUIConstants.WARNING_COLOR
-                what = _("Some words could not be read with certainty. Compare every word with your paper.")
+                if self.review.reading.ambiguous_order:
+                    what = _("Your words are in two columns that can be read in two orders. "
+                             "Check the order of every word against your paper.")
+                else:
+                    what = _("Some words could not be read with certainty. Compare every word with your paper.")
             else:
                 status_headline = _("Invalid checksum")
                 status_color = GUIConstants.DIRE_WARNING_COLOR

@@ -125,6 +125,7 @@ class HandwrittenReadingStub:
         word_image = Image.new("L", (150, 40), 255)
         ImageDraw.Draw(word_image).text((8, 4), mnemonic_12[0], fill=0, font=ImageFont.load_default(size=28))
         self.words = [SimpleNamespace(image=word_image)] * len(mnemonic_12)
+        self.ambiguous_order = False
         self.analysis = SimpleNamespace(
             mnemonic=mnemonic_12,
             status=status,
@@ -139,6 +140,8 @@ handwritten_review_valid = handwritten_views.HandwrittenReview(HandwrittenReadin
 handwritten_review_uncertain = handwritten_views.HandwrittenReview(HandwrittenReadingStub("uncertain", {0: ["form"], 5: ["sight"]}))
 handwritten_review_uncertain.confirmed[5] = mnemonic_12[5]
 handwritten_review_invalid = handwritten_views.HandwrittenReview(HandwrittenReadingStub("invalid", {0: ["form"]}))
+handwritten_review_order = handwritten_views.HandwrittenReview(HandwrittenReadingStub("uncertain", {k: ["form"] for k in range(12)}))
+handwritten_review_order.reading.ambiguous_order = True
 
 
 # Grab the most recent release version info for the "release build" splash screenshots.
@@ -484,6 +487,7 @@ def generate_screenshots(locale):
                 ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_valid), screenshot_name="HandwrittenStatusView_valid"),
                 ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_uncertain), screenshot_name="HandwrittenStatusView_uncertain"),
                 ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_invalid), screenshot_name="HandwrittenStatusView_invalid"),
+                ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_order), screenshot_name="HandwrittenStatusView_order"),
                 ScreenshotConfig(handwritten_views.HandwrittenReviewView, dict(review=handwritten_review_uncertain)),
                 ScreenshotConfig(handwritten_views.HandwrittenWordView, dict(review=handwritten_review_uncertain, word_index=0)),
                 ScreenshotConfig(handwritten_views.HandwrittenWordEntryView, dict(review=handwritten_review_uncertain, word_index=0)),

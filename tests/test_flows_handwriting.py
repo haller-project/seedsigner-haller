@@ -45,6 +45,7 @@ class StubReading:
         self.mnemonic = mnemonic
         self.uncertain = uncertain or {}
         self.is_valid = is_valid
+        self.ambiguous_order = False
         self.analyze_calls = []
 
 
@@ -157,6 +158,27 @@ class TestHandwritingFlows(FlowTest):
         # each distinct analysis is computed once
         assert reading.analyze_calls == [{}, {2: "ability"}, {2: "abandon"}]
         assert self.controller.storage.get_pending_seed().mnemonic_list == VALID_MNEMONIC
+
+
+    def test_ambiguous_order_flow(self):
+        """
+        A list whose two column orders both give a plausible seed is announced as such,
+        every word being uncertain.
+        """
+        reading = StubReading(VALID_MNEMONIC, uncertain={k: ["ability"] for k in range(12)})
+        reading.ambiguous_order = True
+        screens = []
+
+        def record_screen(view: handwritten_views.HandwrittenStatusView):
+            run_screen = view.run_screen
+            view.run_screen = lambda *args, **kwargs: screens.append(kwargs) or run_screen(*args, **kwargs)
+
+        self.run_sequence(self.scan_steps(reading) + [
+            FlowStep(handwritten_views.HandwrittenStatusView, before_run=record_screen, button_data_selection=handwritten_views.HandwrittenStatusView.UNDERSTAND),
+            FlowStep(handwritten_views.HandwrittenReviewView),
+        ])
+
+        assert "two orders" in screens[0]["paragraphs"][0][1]
 
 
     def test_done_requires_uncertain_words_confirmed(self):

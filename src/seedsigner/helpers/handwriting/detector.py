@@ -105,7 +105,7 @@ ORIENTATION_MARGIN = 1.0
 
 # Printed or ruled lines of the word crops: made horizontal (preprocess.level_lines) or erased (erase_lines), on cards
 # or on every document; None: left as they are
-LINE_MODE = "level"
+LINE_MODE = None
 LINE_DOCUMENTS = "cards"
 
 # Word crops around the box, in box heights (horizontal, top, bottom): first reading, taller band, wider band

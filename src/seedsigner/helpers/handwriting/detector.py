@@ -926,8 +926,12 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
     for b in det.words:
         if b.score > 0:
             groups.setdefault(det.card_of(b.center), []).append(b)
+    for g in [g for g, boxes in groups.items() if g >= 0 and len(boxes) < MIN_GROUP_WORDS]:
+        # a card kernel with fewer words is no document: its words are free words
+        groups.setdefault(-1, []).extend(groups.pop(g))
     for n in det.numbers:
-        number_groups.setdefault(det.card_of(n.center), []).append(n)
+        g = det.card_of(n.center)
+        number_groups.setdefault(g if g in groups or g < 0 else -1, []).append(n)
     candidates = []
 
     def add_candidate(g, boxes):

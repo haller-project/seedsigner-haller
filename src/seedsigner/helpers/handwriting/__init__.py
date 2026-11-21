@@ -131,6 +131,12 @@ LOOSE_FINGERPRINT_MARGIN = 0.0
 # 0.005 s; measured with embit on 20/11/2026) and its check, seconds.
 FINGERPRINT_CANDIDATES = 3
 FINGERPRINT_COST = 0.1
+# The fingerprint line is read three times: as cut, and without FINGERPRINT_TRIM of its height at the top, then at
+# the bottom; the probability of a fingerprint is the mean of the three (FingerprintCheck), which still sums to 1 over
+# the strings of 8 digits, so the bound of fingerprint.MIN_MATCH_PROBABILITY is unchanged. A single cut is too
+# sensitive to its edges: on a real photo of the Pi (21/11/2026, nines written with a tail), the probability of the
+# right fingerprint went from 9e-6 to 3e-2 when the cut moved by 2 % of its height.
+FINGERPRINT_TRIM = 0.02
 
 # Guards of a valid seed (see guard), chosen on simulated pages kept apart
 # from the tests and on the development half of the real photos:
@@ -844,10 +850,15 @@ def check_fingerprint(reading: SeedReading, pool: list, progress: Progress) -> S
         (`verified`), or `reading` with every word uncertain; the check is in
         `fingerprint` of the reading returned.
     """
-    ink = normalize_word(reading.fingerprint_crop)
-    if ink is None:
+    crop = reading.fingerprint_crop
+    w, h = crop.size
+    trim = round(FINGERPRINT_TRIM * h)
+    crops = [crop] + ([crop.crop((0, trim, w, h)), crop.crop((0, 0, w, h - trim))] if trim else [])
+    inks = [ink for ink in (normalize_word(c) for c in crops) if ink is not None]
+    if not inks:
         return reading
-    check = fingerprint.FingerprintCheck([fingerprint.FingerprintReading(fingerprint_network().log_probs(ink))])
+    check = fingerprint.FingerprintCheck([fingerprint.FingerprintReading(fingerprint_network().log_probs(ink))
+                                          for ink in inks])
     candidates, seen = [], set()
     for _, seed, words in sorted(pool, key=lambda item: item[0]):
         if tuple(seed) not in seen and len(candidates) < FINGERPRINT_CANDIDATES:

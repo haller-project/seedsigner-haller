@@ -152,3 +152,45 @@ def locate_word(line: Image.Image) -> tuple[np.ndarray, tuple[int, int, int, int
     width = min(max(width, 8), MAX_INPUT_WIDTH)
     resized = Image.fromarray((word * 255).astype(np.uint8)).resize((width, INPUT_HEIGHT), Image.BILINEAR)
     return np.asarray(resized), (x0 * factor, y0 * factor, x1 * factor, y1 * factor)
+
+
+
+def unread_ink(line: Image.Image, share: float = 0.14) -> float:
+    """
+        Width, in heights of the text, of the faint ink of `line` left out of
+        the word that normalize_word gives to the recognizer: strokes on the
+        rows of the word, beyond its first or last column, lighter than its
+        threshold but darker than `share` of the darkest strokes once averaged
+        over 3 x 3 pixels (faded or broken letters). 0.0 if there is none or no
+        word is found.
+    """
+    line = line.convert("L")
+    factor = 1
+    if line.height > WORKING_HEIGHT:
+        factor = -(-line.height // WORKING_HEIGHT)
+        line = line.reduce(factor)
+    a = np.asarray(line, np.float32)
+    background = box_mean(a, max(4, line.height // 4))
+    ink = np.clip((background - a) / np.maximum(0.5 * background, 1), 0, 1)
+    strongest = np.percentile(ink, 99.5)
+    if strongest < 0.08:
+        return 0.0
+    threshold = max(0.06, 0.35 * strongest)
+    faint_threshold = max(0.03, share * strongest)
+    faint = (box_mean(ink, 1) > faint_threshold) & (ink > 0.7 * faint_threshold)
+    lines = faint | (ink > 0.5 * threshold)
+    long_runs = lines & ~remove_long_runs(lines, max(24, line.width // 4))
+    long_runs[1:] |= long_runs[:-1]
+    long_runs[:-1] |= long_runs[1:]
+    mask = (ink > threshold) & ~long_runs
+    faint &= ~long_runs
+    rows = text_rows(mask)
+    if rows is None:
+        return 0.0
+    y0, y1 = rows
+    height = y1 - y0
+    columns = word_columns(mask[y0:y1], height)
+    pale = word_columns(faint[y0:y1], height)
+    if columns is None or pale is None:
+        return 0.0
+    return max(0, columns[0] - pale[0], pale[-1] - columns[-1]) / max(height, 1)

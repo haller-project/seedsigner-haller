@@ -67,7 +67,8 @@ MIN_GROUP_WORDS = 3           # a document with fewer words is a blank card or n
 ALL = -2                      # document made of every word found, cards and free words together
 MIN_OTHER_WORDS = 6           # words of another document making every word uncertain
 BEYOND_TEXT = 0.3             # writing of a card farther than this many word heights beyond its text: card cut there
-ZOOM_SHARE = 0.4              # documents covering less of the photo are detected again on their region
+ZOOM_SHARE = 0.5              # documents covering less of the photo are detected again on their region (0.4 before
+                              # the detector of 21/11/2026)
 ZOOM_MARGIN = 0.15            # margin of that region, share of its size on each side
 
 # Lines and columns, in word box heights

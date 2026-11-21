@@ -108,7 +108,8 @@ FINGERPRINT_FIT = -21.0
 # judged by the fingerprint network alone, with the same thresholds (real photos of the Pi, 21/11/2026: a lowercase
 # fingerprint at a margin of 19 and a fit of -22.6 by the word networks, 27.7 and +0.6 by the fingerprint network;
 # the word lines of the same photos at -20 or below for all three). The fingerprint network is loaded only then.
-FINGERPRINT_RESCUE_MARGIN = 12.0
+# Lowered from 12 to 10 with the detector of 21/11/2026 (tuning benches: 4 more exact seeds, no wrong seed verified).
+FINGERPRINT_RESCUE_MARGIN = 10.0
 
 # The fingerprint line is checked against the FINGERPRINT_CANDIDATES most
 # probable valid seeds of the readings (every reading order, network and

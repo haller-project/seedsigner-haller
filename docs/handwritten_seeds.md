@@ -647,7 +647,7 @@ described in [How it works](#how-it-works):
 |---|---|---|
 | `haller-1-capitals.npz` | reads every photo; trained mostly on capitals | `2e9275f1acd0d347437e856160430e96a283ec484a48ab96a2ea1ca91531fe14` |
 | `haller-1-lowercase.npz` | second reading; more lowercase and cursive writing | `5d340b354ced032992cb474f03bcc0b063f24ee8e1446d2953203b778652e509` |
-| `haller-1-detector.npz` | word, line number and card detector: finds the words on every photo | `8ddddf19ee0088e8dcfe71ba12377167feeb6a626cd6edb17b0bed3b5f69fc5b` |
+| `haller-1-detector.npz` | word, line number and card detector: finds the words on every photo | `b33f6d02f1af87a4aff1cecc73368cc2230c2fa68d0eda977a112df437d501cc` |
 | `haller-1-fingerprint.npz` | reads the fingerprint line that is checked; same architecture as the word networks | `b92cca552dc0a718d309a98b3e5f7ed6f20ee0be32f92aec8df1804d809de454` |
 
 The fingerprint network was trained from the capitals one (Haller commit

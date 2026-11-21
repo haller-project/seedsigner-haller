@@ -1,7 +1,7 @@
 """
     Word detector of Haller-1: a small fully convolutional network (C library,
     native/handwriting.c) that finds the handwritten words, the line numbers
-    and the cards on the photo reduced to 288 x 384 pixels. It is the first
+    and the cards on the photo reduced to 288 x 384 pixels. It is the only
     search of the words, for every kind of backup: the official SeedSigner
     card, other printed cards and free lists on any paper.
 
@@ -59,10 +59,13 @@ KERNEL_SHRINK = 0.88          # card kernel = card area shrunk to this share aro
 MIN_CARD_KERNEL = 150         # output pixels of a card kernel component (smaller ones: stray card
                               # kernels on lists; chosen on simulated pages kept apart from the tests)
 MIN_GROUP_WORDS = 3           # a document with fewer words is a blank card or noise
+ALL = -2                      # document made of every word found, cards and free words together
 MIN_OTHER_WORDS = 6           # words of another document making every word uncertain
 
 # Lines and columns, in word box heights
 SAME_LINE = 0.55              # two boxes closer than this across the text direction are on the same line
+SAME_WORD = 0.3               # two boxes closer than this across the text are on the same line even if they overlap
+MIN_HEIGHT_SHARE = 0.6        # boxes lower than this share of the median height are dropped when the count is wrong
 COLUMN_GAP = 1.5              # empty width between two columns
 GRID_WORD_GAP = 0.9           # gap along a row above which two pieces are two words of a grid
 MIN_GRID_ROWS_SHARE = 0.75    # share of the rows of a grid holding its full number of words
@@ -100,7 +103,7 @@ NUMBER_CHECK_OTHER = 0.05
 # Word crops around the box, in box heights (horizontal, top, bottom): first reading, taller band, wider band
 CROP_VARIANTS = ((0.6, 0.85, 0.75), (0.6, 1.1, 1.0), (1.2, 0.8, 0.7))
 
-# Expected duration on a Pi Zero, in seconds (see page.SEARCH_COST): network and decoding, reading of a number
+# Expected duration on a Pi Zero, in seconds (see Progress in __init__.py): network and decoding, reading of a number
 DETECTOR_COST = 1.8
 NUMBER_COST = 0.15
 
@@ -359,6 +362,18 @@ def copy_box(b: Box) -> Box:
 
 
 
+def covers(line: Box, point: tuple[float, float], margin: float = 0.2, across: float = 0.6) -> bool:
+    """
+        True if the output pixel `point` lies on the box `line`, widened by
+        `margin` heights along the text, within `across` heights of its center
+        line.
+    """
+    x, y = point
+    a, b = x * line.ux + y * line.uy, -x * line.uy + y * line.ux
+    return line.a0 - margin * line.h <= a <= line.a1 + margin * line.h and abs(b - line.c) <= across * line.h
+
+
+
 def stacked(a: Box, b: Box) -> bool:
     """
         Two boxes overlapping along the text by more than a third of the
@@ -389,7 +404,8 @@ def group_lines(boxes: list[Box]) -> list[list[Box]]:
     for c0, c1 in columns:
         lines = []
         for b in sorted((b for b in boxes if c0 <= b.middle <= c1), key=lambda b: b.c):
-            if lines and abs(b.c - lines[-1].c) < SAME_LINE * max(h, b.h) and not stacked(lines[-1], b):
+            gap = abs(b.c - lines[-1].c) if lines else math.inf
+            if gap < SAME_WORD * max(h, b.h) or (gap < SAME_LINE * max(h, b.h) and not stacked(lines[-1], b)):
                 lines[-1].merge(b)
             else:
                 lines.append(b)
@@ -845,9 +861,10 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
     """
         Words of the card or list on `image` (upright grayscale photo, full
         resolution) found by the detector (see the steps above).
-        `fingerprint(crop)`: see page.find_words; a list with one line more
-        than a valid number of words leaves out the one line it accepts
-        (`layout.fingerprint`, see page.spare_lines).
+        `fingerprint(crop)`: True if the line on `crop` reads as a master key
+        fingerprint; a list with one line more than a valid number of words
+        leaves out the one line it accepts (`layout.fingerprint`, see
+        page.spare_lines).
         `layout.doubtful`: words never certain (slots where the word map shows
         ink but no word box was found). Raises WordsNotFound if no document
         with a valid number of words is found.
@@ -862,11 +879,30 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
     for n in det.numbers:
         number_groups.setdefault(det.card_of(n.center), []).append(n)
     candidates = []
-    for g, boxes in groups.items():
+
+    def add_candidate(g, boxes):
+        columns = group_lines([copy_box(b) for b in boxes])
+        n = sum(len(c) for c in columns)
+        if n not in page.SEED_LENGTHS:
+            # boxes much lower than the others are specks or text seen through the sheet
+            h = float(np.median([b.h for b in boxes]))
+            kept = [b for b in boxes if b.h >= MIN_HEIGHT_SHARE * h]
+            if MIN_GROUP_WORDS <= len(kept) < len(boxes):
+                other = group_lines([copy_box(b) for b in kept])
+                if sum(len(c) for c in other) in page.SEED_LENGTHS:
+                    groups[g], columns, n = kept, other, sum(len(c) for c in other)
+        candidates.append((n in page.SEED_LENGTHS, n, g, columns))
+
+    for g, boxes in list(groups.items()):
         if len(boxes) >= MIN_GROUP_WORDS:
-            columns = group_lines([copy_box(b) for b in boxes])
-            n = sum(len(c) for c in columns)
-            candidates.append((n in page.SEED_LENGTHS, n, g, columns))
+            add_candidate(g, boxes)
+    if len(groups) > 1 and not any(m[0] for m in candidates):
+        # no document with a valid number of words: the card areas may be parts of one sheet
+        groups[ALL] = [b for boxes in groups.values() for b in boxes]
+        number_groups[ALL] = list(det.numbers)
+        add_candidate(ALL, groups[ALL])
+        if candidates[-1][0]:
+            candidates = [candidates[-1]]
     if not candidates:
         raise WordsNotFound("no words found")
     candidates.sort(key=lambda m: (m[0], m[1]), reverse=True)
@@ -914,6 +950,8 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
     if count not in page.SEED_LENGTHS:
         raise WordsNotFound(f"{count} lines found", at_edge=at_edge, line_count=count, card=g >= 0 and at_edge)
     lines = [b for c in columns for b in c]
+    extra = [(b.score, (b.a1 - b.a0) / b.h, det.card_of(b.center) != g) for b in det.words
+             if not any(covers(line, b.center) for line in lines)]
     numbers = number_groups.get(g, [])
     linked = anchored["numbers"] if anchored else link_numbers(det, lines, numbers)
     quads = [[det.to_photo(b.quad(m)) for b in lines] for m in CROP_VARIANTS]
@@ -949,6 +987,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
     if first_number_needed and not at_edge:
         p = number(orders[0][0]) if orders[0][0] in linked else None
         at_edge = p is None or p[0] < 0.5
+    orders_found = len(orders)
     if len(orders) > 1 and linked:
         # numbers read first where the orders disagree, until one of them leads by ORDER_MARGIN
         positions = [{k: i for i, k in enumerate(o)} for o in orders]
@@ -971,6 +1010,11 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
     layout.doubtful = anchored["synthetic"] if anchored else set()
     layout.fingerprint = spare
     layout.lengths = [getattr(b, "ink", b.a1 - b.a0) / b.h for b in lines]
+    layout.extra_words = extra
+    layout.orders_found = orders_found
+    layout.numbers_linked = len(linked)
+    layout.numbers_read = len(read_numbers)
+    layout.anchored = anchored is not None
 
     def check(order: list[int]) -> bool:
         """

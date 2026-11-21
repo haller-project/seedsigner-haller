@@ -6,18 +6,17 @@
         reading = read_seed(image, progress, on_word)
         analysis = reading.analyze(confirmed)
 
-    Each word is cut out of the photo (page.py), normalized (preprocess.py),
+    Each word is found and cut out of the photo by the word detector of
+    Haller-1 (detector.py), normalized (preprocess.py),
     read by a small neural network (word_model.py) and scored against the 2 048
     BIP39 words (decoder.py); the checksum then chooses the seed among the
     plausible readings and flags uncertain words (checksum.py). The network is
     Haller-1, made of two sets of weights: a seed that is not valid with the
     first one is read again by the second one, trained with more lowercase and
-    cursive writing. The words are searched by the rules of page.py first; a
-    photo on which they find no valid seed is searched again by the word
-    detector of Haller-1 (detector.py), whose seed is only valid if the rules
-    do not contradict it, then, if no list was found, as a list of two columns
-    written too close together (page.find_aligned_words). The result must
-    always be reviewed by the user against the paper.
+    cursive writing. The detector finds words, line numbers and cards with no
+    rule about the kind of document; the reading order comes from the numbers
+    when they tell it, otherwise from the geometry of the lines and columns.
+    The result must always be reviewed by the user against the paper.
 """
 import math
 import threading
@@ -28,7 +27,7 @@ from PIL import Image
 from . import detector, fingerprint
 from .checksum import Analysis, MIN_PLAUSIBLE_SEED, MIN_SEED_PROBABILITY
 from .decoder import number_probabilities
-from .page import LIST_SEARCH_COST, RECTIFY_COSTS, SEARCH_COST, WordsNotFound, find_aligned_words, find_words
+from .page import WordsNotFound
 from .preprocess import normalize_word
 from .word_model import MODEL_PATH
 
@@ -86,17 +85,6 @@ TEMPERATURES = {FIRST: 2.2, LOWERCASE: 2.2, BLEND: 2.2}
 NUMBER_PROBABILITY = 0.9
 MIN_NUMBER_VOTES = 3
 
-# Each search checks the seed of the other one (see agrees): a word it read
-# with a probability of at least AGREEMENT_PROBABILITY must be the same.
-AGREEMENT_PROBABILITY = 0.9
-
-# A list of two columns too close for the rules to tell apart is cut where the
-# right column starts (page.find_aligned_words), when neither the rules nor the
-# detector give a valid seed. Cutting a page that is not such a list gives
-# random words: the reading is kept only if its seed probability reaches
-# ALIGNED_MIN_SEED_PROBABILITY (1e-9 to 1e-16 for random words).
-ALIGNED_MIN_SEED_PROBABILITY = 1e-4
-
 # A list with one line more than a valid number of words may carry the master
 # key fingerprint written under (or above) the words: its first line, or the
 # last line of a column, is left out of the words if it reads as 8
@@ -122,27 +110,22 @@ FINGERPRINT_FIT = -21.0
 FINGERPRINT_CANDIDATES = 16
 FINGERPRINT_COST = 0.1
 
-# A seed of the detector is only valid, when the rules found no valid seed,
-# if its probability is at least DETECTOR_MIN_SEED_PROBABILITY, and, when the
-# rules read as many words, if they read every word the same with a
-# probability of at least RULES_DOUBT: the detector mostly reads the photos
-# where the rules hesitate (crossed-out or faded words, other documents in the
-# field), where wrong readings that pass the checksum are more frequent.
-# Chosen on simulated pages kept apart from the tests (the lowest probability
-# with no wrong seed declared valid).
-DETECTOR_MIN_SEED_PROBABILITY = 0.99
-RULES_DOUBT = 0.5
-
-# A word of a valid detector seed whose box is at least STRETCH times longer
-# per letter of the word read than the median of the page is uncertain: part
-# of it was probably not read (faded or broken letters, see stretched_words).
-# Chosen on simulated pages kept apart from the tests.
-import os  # noqa: E402  (experiment switch, removed before release)
-STRETCH = float(os.environ.get("HW_STRETCH", "2.0"))
-
-# When the rules find no words at all, they cannot contradict the detector:
-# its seed is then valid from DETECTOR_ALONE_MIN_SEED_PROBABILITY.
-DETECTOR_ALONE_MIN_SEED_PROBABILITY = float(os.environ.get("HW_DET_ALONE", "0.99"))
+# Guards of a valid seed (see guard), chosen on simulated pages kept apart
+# from the tests:
+# * its probability is at least MIN_DETECTOR_SEED_PROBABILITY;
+# * the numbers of its first and last words do not contradict their positions
+#   (page upside down, order wrong);
+# * no handwritten word found by the detector with a box score of at least
+#   LEFT_OUT_SCORE and a length of at least LEFT_OUT_LENGTH heights was left
+#   out of the reading (another document, a word crossed out and rewritten);
+# * a word whose box is at least STRETCH times longer per letter of the word
+#   read than the median of the page is uncertain: part of it was probably
+#   not read (faded or broken letters, see stretched_words).
+MIN_DETECTOR_SEED_PROBABILITY = 0.99
+CHECK_NUMBERS = True
+LEFT_OUT_SCORE = 0.8
+LEFT_OUT_LENGTH = 1.0
+STRETCH = 2.0
 
 # Expected duration of the steps of a reading, in seconds on a Pi Zero (see
 # Progress): loading of the models, reading of a word by the first network
@@ -541,8 +524,7 @@ def reading_cost(layout) -> float:
     """
         Expected cost of the reading of the words of `layout` (see Progress).
     """
-    rectify = sum(RECTIFY_COSTS) if layout.kind != "list" else 0.0
-    return rectify + layout.count * (WORD_COST + OTHER_WORD_COST)
+    return layout.count * (WORD_COST + OTHER_WORD_COST)
 
 
 
@@ -565,35 +547,8 @@ def read_words(layout, progress: Progress, on_word=None, plausible: list = None,
             analysis = other.analyze()
             if (STATUS_RANK[analysis.status], analysis.confidence) > (STATUS_RANK[best.status], best.confidence):
                 reading, best = other, analysis
+    reading.reader = reader
     return reading
-
-
-
-def agrees(reading: SeedReading, other: SeedReading | None, plausible: list, weak: bool = False) -> bool:
-    """
-        True if the valid seed of `reading` may stay valid given `other`, the
-        reading of the same photo by the other search (None if it found no
-        words), and `plausible`, the plausible seeds of `other`.
-        * No plausible seed of `other` differs from it (weak: no valid seed).
-        * No word read by `other` (same number of words) with a probability of
-          at least AGREEMENT_PROBABILITY differs from it (weak: unless `other`
-          is invalid, which happens when it read another document, the page in
-          the wrong direction or the words shifted).
-    """
-    if other is None:
-        return True
-    seed = reading.analyze().mnemonic
-    analysis = other.analyze()
-    if weak:
-        if analysis.status == "valid" and analysis.mnemonic != seed:
-            return False
-    elif any(s != seed for s in plausible):
-        return False
-    if len(other.words) == len(seed) and not (weak and analysis.status == "invalid"):
-        for word, chosen in zip(other.words, seed):
-            if word.candidates[0][0] != chosen and top_probability(word.candidates) >= AGREEMENT_PROBABILITY:
-                return False
-    return True
 
 
 
@@ -636,24 +591,11 @@ def fingerprint_accepted(found: list[tuple[float, float]] | None) -> bool:
 
 
 
-def confirms(rules: SeedReading | None, seed: list[str]) -> bool:
-    """
-        True if `rules` found another number of words, or read every word of
-        `seed` as its most probable word with a probability of at least
-        RULES_DOUBT.
-    """
-    if rules is None or len(rules.words) != len(seed):
-        return True
-    return all(w.candidates[0][0] == s and top_probability(w.candidates) >= RULES_DOUBT
-               for w, s in zip(rules.words, seed))
-
-
-
 def search(find, gray: Image.Image, progress: Progress, on_word, pool: list, fingerprint) \
         -> tuple[SeedReading | None, list, Exception]:
     """
         (reading, its plausible seeds, None) of the words found by `find`
-        (`fingerprint`: see page.find_words), or (None, [], WordsNotFound) if
+        (`fingerprint`: see detector.find_words), or (None, [], WordsNotFound) if
         it finds none. The most probable valid seeds are appended to `pool`
         (see read_layout).
     """
@@ -690,76 +632,53 @@ def stretched_words(reading: SeedReading) -> set[int]:
 
 
 
+def guard(reading: SeedReading):
+    """
+        Guards of a valid seed (see MIN_DETECTOR_SEED_PROBABILITY): every word
+        becomes uncertain if the numbers contradict the order or a handwritten
+        word was left out; stretched words become uncertain.
+    """
+    layout = reading.layout
+    if (CHECK_NUMBERS and layout.check(reading.order)) or any(
+            score >= LEFT_OUT_SCORE and length >= LEFT_OUT_LENGTH for score, length, _ in layout.extra_words):
+        reading.mark_disputed()
+        return
+    reading.min_seed_probability = max(reading.min_seed_probability, MIN_DETECTOR_SEED_PROBABILITY)
+    reading.doubtful |= stretched_words(reading)
+    reading._last = None
+
+
+
 def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
     """
         Reads the seed written on `image` (upright photo, full resolution).
         `progress(fraction)` is called as the reading goes, at least every
         second or so on a Pi Zero; `on_word(layout, k, word_reading)` after the
-        first reading of each word. Raises WordsNotFound if no card or list with
-        a valid number of words is found.
+        first reading of each word. Raises WordsNotFound if no document with a
+        valid number of words is found.
 
-        The words are searched by the rules first (page.py); a valid seed of
-        the rules is the result. Otherwise the words are searched again by the
-        detector (detector.py). Its seed is only valid if the rules read no
-        other plausible seed (see agrees), and read every word the same if
-        they found as many (see confirms); if the numbers of its first and last
-        words do not contradict their positions; and if its probability is at
-        least DETECTOR_MIN_SEED_PROBABILITY. The detector reading is kept
-        unless the rules one has a better status, or the same with a more
-        probable seed.
+        The words are found by the detector (detector.find_words) and read;
+        a valid seed then goes through the guards (see guard), and a
+        fingerprint line written with the words is checked
+        (check_fingerprint).
     """
-    progress = Progress(progress or (lambda fraction: None), SEARCH_COST + 12 * (WORD_COST + OTHER_WORD_COST))
+    progress = Progress(progress or (lambda fraction: None), detector.DETECTOR_COST + 12 * (WORD_COST + OTHER_WORD_COST))
     if not _engine:
         progress.expect(progress.remaining + LOAD_COST)
         load_engine()
         progress.step(LOAD_COST)
     gray = image.convert("L")
-    plausible = []
     pool = []
 
     def spare_line(crop):
         progress.step(WORD_COST + OTHER_WORD_COST)
         return is_fingerprint(crop)
 
-    rules, plausible, not_found = search(find_words, gray, progress, on_word, pool, spare_line)
-    reading = rules
-    if rules is None or rules.analyze().status != "valid":
-        progress.expect(detector.DETECTOR_COST + 12 * (WORD_COST + OTHER_WORD_COST))
-        first, _, _ = search(detector.find_words, gray, progress, on_word, pool, spare_line)
-        if first is not None and first.analyze().status == "valid":
-            if not agrees(first, rules, plausible) or not confirms(rules, first.analyze().mnemonic) \
-                    or first.layout.check(first.order):
-                first.mark_disputed()
-            else:
-                floor = DETECTOR_ALONE_MIN_SEED_PROBABILITY if rules is None else DETECTOR_MIN_SEED_PROBABILITY
-                if first.min_seed_probability < floor:
-                    first.min_seed_probability = floor
-                stretched = stretched_words(first)
-                if stretched:
-                    first.doubtful |= stretched
-                first._last = None
-        if first is not None:
-            a, b = first.analyze(), rules.analyze() if rules is not None else None
-            if b is None or (STATUS_RANK[a.status], a.confidence) >= (STATUS_RANK[b.status], b.confidence):
-                reading = first
-
-    # No valid seed and no layout found by the rules on a list: its columns may be too close to be told apart
-    if not_found is not None and not not_found.card and (reading is None or reading.analyze().status != "valid"):
-        progress.expect(LIST_SEARCH_COST + 12 * (WORD_COST + OTHER_WORD_COST))
-        try:
-            layout = find_aligned_words(gray, progress.step, fingerprint=spare_line)
-        except WordsNotFound:
-            layout = None
-        if layout is not None:
-            progress.expect(reading_cost(layout))
-            other = read_words(layout, progress, on_word, pool=pool)
-            analysis = other.analyze()
-            if analysis.confidence >= ALIGNED_MIN_SEED_PROBABILITY and (reading is None or (
-                    STATUS_RANK[analysis.status], analysis.confidence)
-                    > (STATUS_RANK[reading.analyze().status], reading.analyze().confidence)):
-                reading = other
+    reading, _, not_found = search(detector.find_words, gray, progress, on_word, pool, spare_line)
     if reading is None:
         raise not_found
+    if reading.analyze().status == "valid":
+        guard(reading)
     if reading.fingerprint_crop is not None:
         reading = check_fingerprint(reading, pool, progress)
     progress.report(1.0)

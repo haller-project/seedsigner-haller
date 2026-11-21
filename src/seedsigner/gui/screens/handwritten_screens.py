@@ -22,8 +22,10 @@ class HandwrittenScanScreen(BaseScreen):
     the full resolution of the camera and returns it as JPEG data (decoded by
     `Camera.decode_frame()`); KEY_LEFT returns RET_CODE__BACK_BUTTON.
 
-    The preview comes from the camera that takes the photo and shows its whole field of
-    view, so the photo is the framed image, taken without delay after the click.
+    The preview comes from the camera that takes the photo and fills the display with
+    the center of its field of view: everything visible is in the photo, which also
+    keeps the margins cut off from the preview. The photo is taken without delay after
+    the click.
     """
     # Full resolution of the OV5647 sensor; the sensor only provides it at up to 15fps,
     # and the framerate also caps the exposure time (1/15s instead of 1/24s in dim light).
@@ -42,6 +44,17 @@ class HandwrittenScanScreen(BaseScreen):
         self.camera.start_single_frame_mode(resolution=self.PHOTO_RESOLUTION, framerate=self.PHOTO_FRAMERATE)
 
         self.instructions_font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.get_button_font_size())
+
+
+    def fill_display(self, frame: Image.Image) -> Image.Image:
+        """
+        The center of `frame`, scaled to fill the whole display. The parts of the frame
+        cut off are still in the photo: everything visible on the display is photographed.
+        """
+        scale = max(self.canvas_width / frame.width, self.canvas_height / frame.height)
+        width, height = self.canvas_width / scale, self.canvas_height / scale
+        left, top = (frame.width - width) / 2, (frame.height - height) / 2
+        return frame.resize((self.canvas_width, self.canvas_height), box=(left, top, left + width, top + height))
 
 
     def _render_instructions(self, text: str, color: str):
@@ -90,14 +103,9 @@ class HandwrittenScanScreen(BaseScreen):
 
                 return self._capture_photo()
 
-            frame = self.camera.read_single_frame_preview(self.PREVIEW_RESOLUTION)
-
-            # The whole frame, fitted to the display height, so that nothing outside of
-            # the preview is in the photo
-            width = round(frame.width * self.canvas_height / frame.height)
+            frame = self.fill_display(self.camera.read_single_frame_preview(self.PREVIEW_RESOLUTION))
             with self.renderer.lock:
-                self.renderer.draw.rectangle((0, 0, self.canvas_width, self.canvas_height), fill=GUIConstants.BACKGROUND_COLOR)
-                self.renderer.canvas.paste(frame.resize((width, self.canvas_height)), ((self.canvas_width - width) // 2, 0))
+                self.renderer.canvas.paste(frame, (0, 0))
                 self._render_instructions("< " + _("back") + "  |  " + _("click a button"), GUIConstants.BODY_FONT_COLOR)
                 self.renderer.show_image()
 

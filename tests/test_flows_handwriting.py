@@ -503,6 +503,36 @@ class TestHandwrittenScanScreen(HandwrittenScreenTestBase):
         mock_camera.stop_single_frame_mode.assert_called_once()
 
 
+    def test_preview_fills_display(self):
+        """
+        The preview fills the whole display with the center of the camera frame, so that
+        everything visible on the display is in the photo.
+        """
+        # Portrait frame (as returned after rotation): left half red, right half blue,
+        # with green bands at the top and bottom that only the photo keeps
+        frame = Image.new("RGB", (240, 320), "red")
+        frame.paste("blue", (120, 0, 240, 320))
+        frame.paste("lime", (0, 0, 240, 40))
+        frame.paste("lime", (0, 280, 240, 320))
+        mock_camera = MagicMock()
+        mock_camera.read_single_frame_preview.return_value = frame
+
+        screen = self.build_screen(mock_camera, left_script=[], anyclick_script=[False, True])
+        pasted = []
+        self.mock_renderer.canvas.paste.side_effect = lambda image, xy: pasted.append((image.copy(), xy))
+        screen._run()
+
+        image, xy = pasted[0]
+        assert xy == (0, 0) and image.size == (240, 240)
+        assert image.getpixel((5, 5)) == (255, 0, 0) and image.getpixel((234, 234)) == (0, 0, 255)
+
+        # A landscape frame (other camera rotation) is cropped at its sides
+        landscape = Image.new("RGB", (320, 240), "lime")
+        landscape.paste("red", (40, 0, 280, 240))
+        image = screen.fill_display(landscape)
+        assert image.size == (240, 240) and image.getpixel((1, 120)) == (255, 0, 0)
+
+
     def test_back_button(self):
         mock_camera = MagicMock()
         screen = self.build_screen(mock_camera, left_script=[True], anyclick_script=[])

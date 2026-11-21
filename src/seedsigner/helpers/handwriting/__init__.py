@@ -110,6 +110,13 @@ FINGERPRINT_FIT = -21.0
 # the word lines of the same photos at -20 or below for all three). The fingerprint network is loaded only then.
 # Lowered from 12 to 10 with the detector of 21/11/2026 (tuning benches: 4 more exact seeds, no wrong seed verified).
 FINGERPRINT_RESCUE_MARGIN = 10.0
+# A list with one line too many none of which passes these thresholds: the one line read by the fingerprint network
+# with a margin of at least LOOSE_FINGERPRINT_MARGIN (and a fit of at least FINGERPRINT_FIT) is left out as a
+# fingerprint hypothesis, kept only if the fingerprint matches one of the seeds read (verified); otherwise the list
+# is not found, as without it. Real photos of the Pi, 21/11/2026 (grid of 3 columns numbered by rows, fingerprint
+# above, its 9 written with a tail and read as a g by the word networks): fingerprint line at +5, word lines of the
+# same photos at -26 or below.
+LOOSE_FINGERPRINT_MARGIN = 0.0
 
 # The fingerprint line is checked against the FINGERPRINT_CANDIDATES most
 # probable valid seeds of the readings (every reading order, network and
@@ -657,6 +664,25 @@ def is_fingerprint(crop: Image.Image) -> bool:
 
 
 
+def fingerprint_hypothesis_margin(crop: Image.Image) -> float | None:
+    """
+        Margin of the line on `crop` read as a fingerprint by the fingerprint
+        network (fingerprint.margins), if it is at least
+        LOOSE_FINGERPRINT_MARGIN with a fit of at least FINGERPRINT_FIT, else
+        None. Used only when no line of a list with one line too many passes
+        is_fingerprint: the line is then left out as a hypothesis, kept only
+        if its fingerprint matches a seed read.
+    """
+    ink = normalize_word(crop)
+    if ink is None:
+        return None
+    _, decoder, _ = load_engine()
+    log_probs = fingerprint_network().log_probs(ink)
+    margin, fit = fingerprint.margins(log_probs, decoder.scores(log_probs))
+    return margin if margin >= LOOSE_FINGERPRINT_MARGIN and fit >= FINGERPRINT_FIT else None
+
+
+
 def fingerprint_accepted(found: list[tuple[float, float]] | None) -> bool:
     """
         True if the margins of a line by both networks (fingerprint_margins)
@@ -759,6 +785,12 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
         progress.step(WORD_COST + OTHER_WORD_COST)
         return is_fingerprint(crop)
 
+    def hypothesis_margin(crop):
+        progress.step(WORD_COST)
+        return fingerprint_hypothesis_margin(crop)
+
+    spare_line.margin = hypothesis_margin
+
     def attempt(crossed: bool):
         pool = []
 
@@ -772,6 +804,11 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             guard(reading)
         if reading.fingerprint_crop is not None:
             reading = check_fingerprint(reading, pool, progress)
+        if getattr(reading.layout if hasattr(reading, "layout") else None, "fingerprint_hypothesis", False) \
+                and not getattr(reading, "verified", False):
+            # a line left out as a fingerprint hypothesis whose fingerprint matches no seed read: the list has one
+            # line too many, as without the hypothesis
+            return None, reading.layout.not_found
         return reading, None
 
     def rank(reading):

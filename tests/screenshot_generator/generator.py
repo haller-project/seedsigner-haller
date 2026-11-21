@@ -142,6 +142,12 @@ handwritten_review_uncertain.confirmed[5] = mnemonic_12[5]
 handwritten_review_invalid = handwritten_views.HandwrittenReview(HandwrittenReadingStub("invalid", {0: ["form"]}))
 handwritten_review_order = handwritten_views.HandwrittenReview(HandwrittenReadingStub("uncertain", {k: ["form"] for k in range(12)}))
 handwritten_review_order.reading.ambiguous_order = True
+_fingerprint_12 = Seed(mnemonic=mnemonic_12, wordlist_language_code=SettingsConstants.WORDLIST_LANGUAGE__ENGLISH).get_fingerprint()
+handwritten_review_fingerprint = handwritten_views.HandwrittenReview(HandwrittenReadingStub("valid", {}))
+handwritten_review_fingerprint.reading.fingerprint = SimpleNamespace(status="verified", matched=_fingerprint_12, text=_fingerprint_12)
+handwritten_review_fingerprint_mismatch = handwritten_views.HandwrittenReview(
+    HandwrittenReadingStub("uncertain", {k: ["form"] for k in range(12)}))
+handwritten_review_fingerprint_mismatch.reading.fingerprint = SimpleNamespace(status="mismatch", matched=None, text="73c5da0a")
 
 
 # Grab the most recent release version info for the "release build" splash screenshots.
@@ -488,6 +494,8 @@ def generate_screenshots(locale):
                 ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_uncertain), screenshot_name="HandwrittenStatusView_uncertain"),
                 ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_invalid), screenshot_name="HandwrittenStatusView_invalid"),
                 ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_order), screenshot_name="HandwrittenStatusView_order"),
+                ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_fingerprint), screenshot_name="HandwrittenStatusView_fingerprint"),
+                ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_fingerprint_mismatch), screenshot_name="HandwrittenStatusView_fingerprint_mismatch"),
                 ScreenshotConfig(handwritten_views.HandwrittenReviewView, dict(review=handwritten_review_uncertain)),
                 ScreenshotConfig(handwritten_views.HandwrittenWordView, dict(review=handwritten_review_uncertain, word_index=0)),
                 ScreenshotConfig(handwritten_views.HandwrittenWordEntryView, dict(review=handwritten_review_uncertain, word_index=0)),

@@ -104,6 +104,18 @@ ALIGNED_MIN_SEED_PROBABILITY = 1e-4
 FINGERPRINT_MARGIN = 17.0
 FINGERPRINT_FIT = -21.0
 
+# The fingerprint line is checked against the FINGERPRINT_CANDIDATES most
+# probable valid seeds of the readings (every reading order, network and
+# layout), in order of rank: the first one whose fingerprint matches (see
+# fingerprint.MIN_MATCH_PROBABILITY) is the seed written, every word certain.
+# When none matches, the seed is never called wrong (a word or a digit may be
+# misread, or the fingerprint is that of the seed with a passphrase): every
+# word is uncertain. FINGERPRINT_COST: computation of one fingerprint on a Pi
+# Zero (PBKDF2-HMAC-SHA512, 2048 rounds, 0.062 s; master key and HASH160,
+# 0.005 s; measured with embit on 20/11/2026) and its check, seconds.
+FINGERPRINT_CANDIDATES = 16
+FINGERPRINT_COST = 0.1
+
 # Expected duration of the steps of a reading, in seconds on a Pi Zero (see
 # Progress): loading of the models, reading of a word by the first network
 # (crop, normalization, network, decoder), by the second network or the blend
@@ -163,6 +175,9 @@ class SeedReading:
         self.ambiguous_order = False
         self.numbered = False
         self.disputed = False
+        self.fingerprint_crop = None
+        self.fingerprint = None
+        self.verified = False
         self._last = None
 
 
@@ -181,6 +196,15 @@ class SeedReading:
             confirmed.
         """
         self.disputed = True
+        self.doubtful = set(range(len(self.words)))
+        self._last = None
+
+
+    def mark_fingerprint_mismatch(self):
+        """
+            The fingerprint written with the words matches none of the seeds
+            read: no word is certain unless confirmed.
+        """
         self.doubtful = set(range(len(self.words)))
         self._last = None
 
@@ -391,17 +415,20 @@ def combine(a: list[tuple[str, float]], b: list[tuple[str, float]]) -> list[tupl
 
 
 def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, float], min_seed_probability: float,
-                on_word=None, plausible: list = None) -> SeedReading:
+                on_word=None, plausible: list = None, pool: list = None) -> SeedReading:
     """
         Reads the words of `reader.layout` with `weights`, reporting each one to
         `progress` and to `on_word` (see read_seed). The plausible seeds of the
-        reading orders are appended to `plausible`.
+        reading orders are appended to `plausible`; their most probable valid
+        seeds to `pool`, as (rank, words, word readings).
     """
     layout = reader.layout
     words = []
 
     def seed_reading(order):
-        return SeedReading(layout.kind, [words[k] for k in order], min_seed_probability, layout.complete)
+        reading = SeedReading(layout.kind, [words[k] for k in order], min_seed_probability, layout.complete)
+        reading.fingerprint_crop = getattr(layout, "fingerprint", None)
+        return reading
 
     for k in range(layout.count):
         words.append(reader.read(k, 0, weights))
@@ -428,6 +455,10 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
     # checksum once in 16 for 12 words: when both orders give a plausible
     # seed, the order written is unknown, unless the line numbers tell it.
     readings = [reading] + [seed_reading(order) for order in layout.orders[1:]]
+    if pool is not None and getattr(layout, "fingerprint", None) is not None:
+        for r in readings:
+            for rank, seed in enumerate(r.analyze().valid_seeds(FINGERPRINT_CANDIDATES)):
+                pool.append((rank, seed, r.words))
     if any(r.analyze().status != "invalid" for r in readings[1:]):
         order = reader.numbered_order()
         if order is not None:
@@ -449,15 +480,15 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
 
 
 def read_page(reader: LayoutReader, progress: Progress, weights: tuple[float, float], min_seed_probability: float,
-              on_word=None, plausible: list = None) -> SeedReading:
+              on_word=None, plausible: list = None, pool: list = None) -> SeedReading:
     """
         Reads `reader.layout` with `weights`, and its list reading if it is a
         card found on part of its lines that gives no valid seed (the better
         one is kept).
     """
-    reading = read_layout(reader, progress, weights, min_seed_probability, on_word, plausible)
+    reading = read_layout(reader, progress, weights, min_seed_probability, on_word, plausible, pool)
     if reading.analyze().status != "valid" and reader.alternative():
-        other = read_layout(reader.alternative(), progress, weights, min_seed_probability, on_word, plausible)
+        other = read_layout(reader.alternative(), progress, weights, min_seed_probability, on_word, plausible, pool)
         if STATUS_RANK[other.analyze().status] > STATUS_RANK[reading.analyze().status]:
             reading = other
     return reading
@@ -473,22 +504,22 @@ def reading_cost(layout) -> float:
 
 
 
-def read_words(layout, progress: Progress, on_word=None, plausible: list = None) -> SeedReading:
+def read_words(layout, progress: Progress, on_word=None, plausible: list = None, pool: list = None) -> SeedReading:
     """
         Reads the words of `layout` with the first network; if the seed is not
         valid, again with the second network, then with the blend of both. A
         reading is kept if its status is better, or as good with a more
         probable seed. The plausible seeds of every reading are appended to
-        `plausible`.
+        `plausible`, their most probable valid seeds to `pool` (see read_layout).
     """
     reader = LayoutReader(layout)
-    reading = read_page(reader, progress, FIRST, MIN_SEED_PROBABILITY, on_word, plausible)
+    reading = read_page(reader, progress, FIRST, MIN_SEED_PROBABILITY, on_word, plausible, pool)
     best = reading.analyze()
     if best.status != "valid":
         progress.expect(2 * layout.count * OTHER_WORD_COST)
         second = ((LOWERCASE, LOWERCASE_MIN_SEED_PROBABILITY), (BLEND, BLEND_MIN_SEED_PROBABILITY))
         for weights, min_seed_probability in second:
-            other = read_page(reader, progress, weights, min_seed_probability, plausible=plausible)
+            other = read_page(reader, progress, weights, min_seed_probability, plausible=plausible, pool=pool)
             analysis = other.analyze()
             if (STATUS_RANK[analysis.status], analysis.confidence) > (STATUS_RANK[best.status], best.confidence):
                 reading, best = other, analysis
@@ -585,6 +616,7 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
         progress.step(LOAD_COST)
     gray = image.convert("L")
     plausible = []
+    pool = []
     not_found = None
 
     def spare_line(crop):
@@ -597,7 +629,7 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
         reading, not_found = None, e
     else:
         progress.expect(reading_cost(layout))
-        reading = read_words(layout, progress, on_word, plausible)
+        reading = read_words(layout, progress, on_word, plausible, pool)
 
     # No valid seed: the words are searched again by the detector; its reading
     # is kept if its status is better, or as good with a more probable seed.
@@ -611,7 +643,7 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             layout = None
         if layout is not None:
             progress.expect(reading_cost(layout))
-            other = read_words(layout, progress, on_word)
+            other = read_words(layout, progress, on_word, pool=pool)
             if other.analyze().status == "valid" and not agrees(other, reading, plausible):
                 other.mark_disputed()
             analysis = other.analyze()
@@ -628,7 +660,7 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             layout = None
         if layout is not None:
             progress.expect(reading_cost(layout))
-            other = read_words(layout, progress, on_word)
+            other = read_words(layout, progress, on_word, pool=pool)
             analysis = other.analyze()
             if analysis.confidence >= ALIGNED_MIN_SEED_PROBABILITY and (reading is None or (
                     STATUS_RANK[analysis.status], analysis.confidence)
@@ -636,5 +668,59 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
                 reading = other
     if reading is None:
         raise not_found
+    if reading.fingerprint_crop is not None:
+        reading = check_fingerprint(reading, pool, progress)
     progress.report(1.0)
     return reading
+
+
+
+def check_fingerprint(reading: SeedReading, pool: list, progress: Progress) -> SeedReading:
+    """
+        Checks the fingerprint line of `reading` (see FINGERPRINT_CANDIDATES)
+        against the candidate seeds of `pool` (see read_layout), most probable
+        first. Returns the reading of the matching seed, every word certain
+        (`verified`), or `reading` with every word uncertain; the check is in
+        `fingerprint` of the reading returned.
+    """
+    ink = normalize_word(reading.fingerprint_crop)
+    if ink is None:
+        return reading
+    first, _, lowercase = load_engine()
+    check = fingerprint.FingerprintCheck([fingerprint.FingerprintReading(n.log_probs(ink)) for n in (first, lowercase)])
+    candidates, seen = [], set()
+    for _, seed, words in sorted(pool, key=lambda item: item[0]):
+        if tuple(seed) not in seen and len(candidates) < FINGERPRINT_CANDIDATES:
+            seen.add(tuple(seed))
+            candidates.append((seed, words))
+    progress.expect(len(candidates) * FINGERPRINT_COST)
+    matched = None
+    # the chosen seed first, then the others together (one pass of the networks' outputs for all of them)
+    for group in (candidates[:1], candidates[1:]):
+        if matched or not group:
+            continue
+        fingerprints = []
+        for seed, _ in group:
+            fingerprints.append(fingerprint.seed_fingerprint(seed))
+            progress.step(FINGERPRINT_COST)
+        check.checked += len(group)
+        for i, ((seed, words), fp, probability) in enumerate(zip(group, fingerprints, check.probabilities(fingerprints))):
+            check.match_probability = max(check.match_probability, probability)
+            if probability >= fingerprint.MIN_MATCH_PROBABILITY:
+                matched = (seed, words)
+                check.matched, check.rank = fp, check.checked - len(group) + i
+                break
+    if matched is None:
+        check.status = "mismatch"
+        reading.mark_fingerprint_mismatch()
+        reading.fingerprint = check
+        return reading
+    seed, words = matched
+    check.status = "verified"
+    verified = SeedReading(reading.kind, [WordReading(w.image, [(word, 0.0)]) for word, w in zip(seed, words)],
+                           reading.min_seed_probability)
+    verified.fingerprint_crop = reading.fingerprint_crop
+    verified.fingerprint = check
+    verified.verified = True
+    verified.numbered = reading.numbered
+    return verified

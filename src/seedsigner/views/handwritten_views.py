@@ -176,12 +176,20 @@ class HandwrittenStatusView(View):
         # TRANSLATOR_NOTE: Inserts the number of words read (e.g. "12 words read")
         title = _("{} words read").format(len(analysis.mnemonic))
 
+        fingerprint = getattr(self.review.reading, "fingerprint", None)
         if analysis.status == "valid":
+            if fingerprint is not None and fingerprint.status == "verified":
+                status_headline = _("Fingerprint matches")
+                # TRANSLATOR_NOTE: Inserts the fingerprint written with the words (e.g. "73c5da0a")
+                text = _("The fingerprint {} written with your words is that of this seed.").format(fingerprint.matched)
+            else:
+                status_headline = _("Valid checksum")
+                text = _("Compare every word with your paper before using this seed.")
             self.run_screen(
                 LargeIconStatusScreen,
                 title=title,
-                status_headline=_("Valid checksum"),
-                text=_("Compare every word with your paper before using this seed."),
+                status_headline=status_headline,
+                text=text,
                 show_back_button=False,
                 button_data=[self.REVIEW],
             )
@@ -191,7 +199,12 @@ class HandwrittenStatusView(View):
                 # TRANSLATOR_NOTE: Inserts the number of uncertain words (e.g. "Words to check: 2")
                 status_headline = _("Words to check: {}").format(len(analysis.uncertain))
                 status_color = GUIConstants.WARNING_COLOR
-                if self.review.reading.ambiguous_order:
+                if fingerprint is not None and fingerprint.status == "mismatch":
+                    # TRANSLATOR_NOTE: Inserts the fingerprint as read (e.g. "73c5da0a")
+                    what = _("The fingerprint read, {}, does not match these words: a word or a digit may be "
+                             "misread, or it belongs to a passphrase. Compare every word with your paper."
+                             ).format(fingerprint.text)
+                elif self.review.reading.ambiguous_order:
                     what = _("Your words are in two columns that can be read in two orders. "
                              "Check the order of every word against your paper.")
                 else:

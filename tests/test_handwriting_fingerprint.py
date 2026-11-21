@@ -123,13 +123,6 @@ def test_fingerprint_line_told_from_words():
 
 
 
-def bip32_fingerprint(words: list[str]) -> str:
-    """ Fingerprint of the master key of the seed (no passphrase), 8 hexadecimal digits. """
-    from embit import bip32, bip39
-    return bip32.HDKey.from_seed(bip39.mnemonic_to_seed(" ".join(words))).my_fingerprint.hex()
-
-
-
 def rendered_list(lines: list[str]) -> Image.Image:
     """ Photo of a list printed in capitals on a light sheet, one line per entry. """
     font = ImageFont.truetype(FONT_PATH, 46)
@@ -149,7 +142,7 @@ def test_fingerprint_line_left_out_of_a_list():
     from embit import bip39
     from seedsigner.helpers.handwriting import page, read_seed
     words = bip39.mnemonic_from_bytes(bytes(random.Random(5).getrandbits(8) for _ in range(16))).split()
-    fp = bip32_fingerprint(words)
+    fp = fingerprint.seed_fingerprint(words)
     for lines in (words + [fp], [fp] + words):
         photo = rendered_list(lines)
         with pytest.raises(page.WordsNotFound):
@@ -169,3 +162,48 @@ def test_word_line_never_left_out():
     words = bip39.mnemonic_from_bytes(bytes(random.Random(8).getrandbits(8) for _ in range(16))).split()
     with pytest.raises(page.WordsNotFound):
         page.find_words(rendered_list(words + ["decade"]), fingerprint=is_fingerprint)
+
+
+
+def test_fingerprint_of_a_test_vector():
+    """ BIP32 fingerprint of the BIP39 test mnemonic « abandon … about », without passphrase. """
+    assert fingerprint.seed_fingerprint(["abandon"] * 11 + ["about"]) == "73c5da0a"
+
+
+
+def test_fingerprint_verifies_the_seed():
+    """ The fingerprint written under the words is that of the seed read: the seed is verified, every word certain,
+    and the check says so. """
+    from embit import bip39
+    from seedsigner.helpers.handwriting import read_seed
+    words = bip39.mnemonic_from_bytes(bytes(random.Random(5).getrandbits(8) for _ in range(16))).split()
+    reading = read_seed(rendered_list(words + [fingerprint.seed_fingerprint(words)]))
+    analysis = reading.analyze()
+    assert reading.verified and reading.fingerprint.status == "verified" and reading.fingerprint.checked == 1
+    assert analysis.mnemonic == words and analysis.status == "valid" and not analysis.uncertain
+    assert reading.fingerprint.matched == fingerprint.seed_fingerprint(words)
+
+
+
+def test_fingerprint_of_another_seed_never_makes_it_wrong():
+    """ A fingerprint that matches none of the seeds read (a passphrase, a misread digit) does not call the seed
+    wrong: the words read are kept, every one of them to check. """
+    from embit import bip39
+    from seedsigner.helpers.handwriting import read_seed
+    words = bip39.mnemonic_from_bytes(bytes(random.Random(5).getrandbits(8) for _ in range(16))).split()
+    other = bip39.mnemonic_from_bytes(bytes(random.Random(6).getrandbits(8) for _ in range(16))).split()
+    reading = read_seed(rendered_list(words + [fingerprint.seed_fingerprint(other)]))
+    analysis = reading.analyze()
+    assert not reading.verified and reading.fingerprint.status == "mismatch" and reading.fingerprint.checked >= 1
+    assert analysis.mnemonic == words and analysis.status == "uncertain" and len(analysis.uncertain) == 12
+    confirmed = reading.analyze({k: w for k, w in enumerate(words)})
+    assert confirmed.status == "valid"
+
+
+
+def test_chance_match_bound():
+    """ The probabilities of all strings of 8 digits sum to 1: at most 1 / MIN_MATCH_PROBABILITY of them match. """
+    lp = random_log_probs(40, "0123456789abcdef", 9)
+    reading = fingerprint.FingerprintReading(lp)
+    assert np.allclose(reading.digits.sum(1), 1.0)
+    assert 1 / (fingerprint.MIN_MATCH_PROBABILITY * 2 ** 32) < 3e-6

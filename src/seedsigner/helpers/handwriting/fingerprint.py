@@ -12,6 +12,14 @@
     the network (`margins`). A backward pass gives the probability of each
     digit at each position; the forward pass restricted to one string, the
     probability of that fingerprint.
+
+    Check: the fingerprint of a candidate seed matches the line if its
+    probability given the line, among all strings of 8 hexadecimal digits,
+    is at least MIN_MATCH_PROBABILITY. These probabilities sum to 1, so at
+    most 1 / MIN_MATCH_PROBABILITY strings reach it: the fingerprint of a
+    wrong seed, uniform over 2^32 values, matches by chance with a
+    probability of at most 1 / (MIN_MATCH_PROBABILITY * 2^32) whatever the
+    calibration of the network.
 """
 import numpy as np
 
@@ -23,6 +31,11 @@ HEX_CLASSES = np.array([1 + ALPHABET.index(c) for c in HEX])
 # Words written before the digits ("FP: 22a2b678"); the colon and spaces are
 # not in the alphabet of the network and read as blanks
 PREFIXES = ("", "fp", "xfp", "mfp", "fingerprint")
+
+# Probability of a fingerprint given the line, among all strings of 8
+# hexadecimal digits, above which it matches (chance match of a wrong seed:
+# at most 1 / (MIN_MATCH_PROBABILITY * 2^32) = 2.3e-6 per seed checked)
+MIN_MATCH_PROBABILITY = 1e-4
 
 
 
@@ -220,3 +233,60 @@ def margins(log_probs: np.ndarray, word_scores: np.ndarray) -> tuple[float, floa
     free = float(log_probs.max(0).sum())
     return hexadecimal - float(np.max(word_scores)), hexadecimal - free
 
+
+
+def seed_fingerprint(words: list[str]) -> str:
+    """
+        Fingerprint of the BIP32 master key of the seed `words` (BIP39, no
+        passphrase), as 8 hexadecimal digits.
+    """
+    from embit import bip32, bip39
+    root = bip32.HDKey.from_seed(bip39.mnemonic_to_seed(" ".join(words)))
+    return root.my_fingerprint.hex()
+
+
+
+
+class FingerprintCheck:
+    """
+        Fingerprint line read by both networks, and its check against the
+        seeds of the reading.
+
+        digits: (LENGTH, 16) mean probability of each digit value at each position
+        text: most probable digit at each position
+        status: "verified" (the fingerprint of a candidate seed matches),
+            "mismatch" (none of the `checked` candidate seeds matches) or None
+            before the check
+        checked: number of candidate seeds whose fingerprint was computed
+        match_probability: probability of the matching fingerprint, or of the
+            best one checked
+        matched: the fingerprint of the seed that matches, as computed (the
+            one to show), or None
+        rank: index of that seed among the candidates, or None
+    """
+    def __init__(self, readings: list[FingerprintReading]):
+        self.readings = readings
+        self.digits = np.mean([r.digits for r in readings], axis=0)
+        self.text = "".join(HEX[i] for i in self.digits.argmax(1))
+        self.status = None
+        self.checked = 0
+        self.match_probability = 0.0
+        self.matched = None
+        self.rank = None
+
+
+    def probabilities(self, fingerprints: list[str]) -> list[float]:
+        """
+            Mean over the networks of the probability of each fingerprint given
+            the line: these also sum to 1 over the strings of 8 digits, so that
+            the bound of MIN_MATCH_PROBABILITY holds.
+        """
+        per_network = [r.probabilities(fingerprints) for r in self.readings]
+        return [float(np.mean(p)) for p in zip(*per_network)]
+
+
+    def digit_probabilities(self) -> list[float]:
+        """
+            Probability of the digit of `text` at each position.
+        """
+        return [float(self.digits[j].max()) for j in range(LENGTH)]

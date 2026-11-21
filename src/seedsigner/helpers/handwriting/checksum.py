@@ -151,6 +151,13 @@ class Analysis:
         return out
 
 
+    def valid_seeds(self, n: int) -> list[list[str]]:
+        """
+            The n most probable valid seeds of the readings (chosen seed first).
+        """
+        return [list(words) for _, words in self._valid[:n]]
+
+
     def word_probability(self, k: int, word: str) -> float:
         """
             Probability that `word` is at position k, given the readings and the

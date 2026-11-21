@@ -263,6 +263,37 @@ as before. The line left out is kept with the layout (`layout.fingerprint`).
 The official SeedSigner card has no such line: its fingerprint box is on the
 back.
 
+### Check of the fingerprint
+
+When a fingerprint line was left out, it is read again by both networks
+(`fingerprint.FingerprintCheck`: probability of each digit at each position
+by a forward-backward pass over the constrained CTC, mean of both networks)
+and compared with the fingerprints of the candidate seeds of the reading:
+the 16 most probable valid seeds (`FINGERPRINT_CANDIDATES`) of every reading
+of the photo (both orders of two columns, both networks and their blend, the
+rules, the detector, two close columns), in order of rank. The fingerprint
+of a seed is computed as SeedSigner does (embit: PBKDF2-HMAC-SHA512 with 2048
+rounds, no passphrase, master key, HASH160 of the master public key, first 4
+bytes).
+
+- A candidate matches if the probability of its fingerprint given the line,
+  among all strings of 8 hexadecimal digits, is at least 1e-4
+  (`fingerprint.MIN_MATCH_PROBABILITY`). These probabilities sum to 1, so at
+  most 10 000 strings reach it: the fingerprint of a wrong seed, uniform over
+  2^32 values, matches by chance with a probability of at most 2.3e-6 per
+  seed checked, whatever the calibration of the networks.
+- The first candidate that matches is the seed written: it is returned with
+  every word certain (`reading.verified`), even when the rules hesitated
+  (order of the columns, twin words, truncated words, a list taken for a
+  card). The screen says « Fingerprint matches » and shows the fingerprint
+  computed.
+- When none matches, the seed is never called wrong: a word or a digit may
+  be misread, or the fingerprint is that of the seed with a passphrase. The
+  words read are kept and every one of them is to check; the screen says
+  that the fingerprint read does not match these words.
+
+The fingerprint is not secret; it stays in the reading, as the words do.
+
 `read_seed(image, progress, on_word)` reports its progress after every step
 of the page search and of the reading. Each step is weighted by its expected
 duration on a Pi Zero (constants `*_COST` in `page.py` and `__init__.py`) and
@@ -468,6 +499,35 @@ photos built to provoke wrong valid seeds (see the threat model), the
 detector adds none (24 before and after, the same photos). Its rules were set
 on 1 331 other simulated photos, apart from all these.
 
+The fingerprint line and its check were measured on simulated photos that
+carry the fingerprint of their seed (written by the generator of the red team
+under or above the list, in capitals or in the font of the page, sometimes
+after « FP », « xfp » or « fingerprint »): the 920 photos of the red team with
+the same pages plus the fingerprint line (cards have none), and 600 ordinary
+lists (12 or 24 words, one or two columns), 1 357 of them with a fingerprint.
+Seeds valid and exact / exact / wrong but reported as valid:
+
+| Photos with a fingerprint | Before | Line left out | Line checked |
+|---|---|---|---|
+| All (1 357) | 13 / 67 / 7 | 455 / 582 / 18 | 425 / 596 / 7 |
+| Ordinary lists, capitals (364) | 5 / 24 / 4 | 149 / 180 / 4 | 122 / 180 / 4 |
+| Ordinary lists, lowercase (236) | 3 / 10 / 0 | 38 / 57 / 1 | 37 / 58 / 0 |
+| Red team, capitals (441) | 4 / 22 / 3 | 217 / 264 / 7 | 208 / 270 / 3 |
+| Red team, lowercase (316) | 1 / 11 / 0 | 51 / 81 / 6 | 58 / 88 / 0 |
+
+Before, the extra line made most lists unreadable (« 13 lines found »). With
+the check, 412 seeds are verified by their fingerprint, all of them right;
+the wrong valid seeds left are all on photos where the fingerprint line was
+not told apart (kept as a line, merged with a word, or the list then had a
+valid number of lines): wherever a fingerprint was left out and read, no
+wrong seed is reported as valid. The cost: a right seed whose fingerprint is
+misread loses its certain words (30 seeds). The matching seed was the chosen
+one in 92 % of the cases, and never beyond rank 5 among the candidates: 16
+are enough. On the 1 605 photos of the measurement above, the 920 of the red
+team, the 1 167 badly framed ones and the real photos, which carry no
+fingerprint, nothing changes: no line is left out (the thresholds keep a
+margin) and the readings are the same, photo for photo.
+
 ## Timings
 
 Measured on a Raspberry Pi Zero with the C library, the application stopped,
@@ -502,6 +562,16 @@ SeedSigner) are loaded while the photo is framed; the camera preview runs at
 stays still for more than 0.9 s. The display of the reading costs 3 to 5 % of
 processor time.
 
+
+A list with a fingerprint line costs more (measured on a Pi Zero, numpy and
+embit of the device, 21/11/2026): each line that may be a fingerprint is read
+by both networks and decoded (0.2 to 0.35 s per network for the decoding),
+the line left out is read again with the probability of each digit (0.3 to
+0.5 s per network), the fingerprint of the chosen seed is computed (0.071 s:
+PBKDF2 0.062 s, master key 0.005 s, libsecp256k1 of embit) and, when it does
+not match, those of the other candidates (16 at most: 1.1 s, and 0.6 to
+1.1 s per network to compare them with the line). About 2 to 5 s in all; a
+photo without a fingerprint line takes the same time as before.
 
 ## The Haller-1 model
 

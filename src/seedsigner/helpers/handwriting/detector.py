@@ -56,7 +56,8 @@ MIN_KERNEL_PIXELS = 2         # smaller word or number kernels are noise
 
 # Documents
 KERNEL_SHRINK = 0.88          # card kernel = card area shrunk to this share around its center
-MIN_CARD_KERNEL = 30          # output pixels of a card kernel component
+MIN_CARD_KERNEL = 150         # output pixels of a card kernel component (smaller ones: stray card
+                              # kernels on lists; chosen on simulated pages kept apart from the tests)
 MIN_GROUP_WORDS = 3           # a document with fewer words is a blank card or noise
 MIN_OTHER_WORDS = 6           # words of another document making every word uncertain
 

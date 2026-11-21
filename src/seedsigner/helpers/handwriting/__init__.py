@@ -138,7 +138,7 @@ RULES_DOUBT = 0.5
 # of it was probably not read (faded or broken letters, see stretched_words).
 # Chosen on simulated pages kept apart from the tests.
 import os  # noqa: E402  (experiment switch, removed before release)
-STRETCH = float(os.environ.get("HW_STRETCH", "1.5"))
+STRETCH = float(os.environ.get("HW_STRETCH", "2.0"))
 
 # Expected duration of the steps of a reading, in seconds on a Pi Zero (see
 # Progress): loading of the models, reading of a word by the first network

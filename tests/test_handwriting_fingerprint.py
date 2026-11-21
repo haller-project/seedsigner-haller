@@ -231,8 +231,54 @@ def test_fingerprint_of_another_seed_never_makes_it_wrong():
 
 
 def test_chance_match_bound():
-    """ The probabilities of all strings of 8 digits sum to 1: at most 1 / MIN_MATCH_PROBABILITY of them match. """
+    """ The probabilities of all strings of 8 digits sum to 1: at most 1 / MIN_MATCH_PROBABILITY of them match; a
+    wrong seed is verified by chance with a probability of at most 1e-6 per photo. """
     lp = random_log_probs(40, "0123456789abcdef", 9)
     reading = fingerprint.FingerprintReading(lp)
     assert np.allclose(reading.digits.sum(1), 1.0)
     assert 1 / (fingerprint.MIN_MATCH_PROBABILITY * 2 ** 32) < 3e-6
+    # per photo: at most FINGERPRINT_CANDIDATES seeds are checked against the one fingerprint line
+    from seedsigner.helpers import handwriting
+    assert handwriting.FINGERPRINT_CANDIDATES / (fingerprint.MIN_MATCH_PROBABILITY * 2 ** 32) <= 1e-6
+
+
+
+def test_shifted_probabilities_sum_to_one(monkeypatch):
+    """ The probabilities of a fingerprint read with one digit missed, or one too many, sum to 1 over every string
+    (checked on strings of 3 digits, every one of them). """
+    monkeypatch.setattr(fingerprint, "LENGTH", 3)
+    rng = np.random.default_rng(5)
+    reading = fingerprint.FingerprintReading.__new__(fingerprint.FingerprintReading)
+    reading.lengths = {n: (0.0, rng.dirichlet(np.ones(16) * 0.3, n)) for n in (2, 4)}
+    strings = ["".join(s) for s in itertools.product(fingerprint.HEX, repeat=3)]
+    shifted = reading.shifted_probabilities(strings)
+    for n in (2, 4):
+        assert sum(shifted[n]) == pytest.approx(1.0)
+
+
+
+def frames_of(text: str, repeat: int = 3) -> np.ndarray:
+    """ Network outputs reading exactly `text`: each character over `repeat` frames, blanks between. """
+    cols = []
+    for c in text:
+        cols += [1 + ALPHABET.index(c)] * repeat + [0]
+    z = np.full((NUM_CLASSES, len(cols) + 2), -30.0)
+    z[0, 0] = z[0, -1] = 0.0
+    for t, k in enumerate(cols, 1):
+        z[k, t] = 0.0
+    z -= np.log(np.exp(z).sum(0, keepdims=True))
+    return z.astype(np.float32)
+
+
+
+def test_fingerprint_read_one_digit_short_or_long():
+    """ A line read with its first digit missed, or with a digit too many, still gives its fingerprint a probability
+    of at least 1e-3 (1 / 128 at most for a digit missed: 8 positions, 16 values), never a wrong one; the weights of the readings depend on the line only and sum to 1. """
+    for text in ("da096c9", "5da0966c9"):
+        shifted = fingerprint.FingerprintReading(frames_of(text), shifts=True)
+        assert sum(shifted.shift_weights().values()) == pytest.approx(1.0)
+        right, wrong = shifted.probabilities(["5da096c9", "1b2c3d4e"])
+        assert right >= 1e-3 and wrong < 1e-9
+    # a line of 8 digits read right keeps nearly all its probability
+    line = frames_of("5da096c9")
+    assert fingerprint.FingerprintReading(line, shifts=True).probabilities(["5da096c9"])[0] > 0.9

@@ -104,16 +104,24 @@ MIN_NUMBER_VOTES = 3
 # lines within 3 of both thresholds.
 FINGERPRINT_MARGIN = 17.0
 FINGERPRINT_FIT = -21.0
+# A line whose mean margin by both networks is at least FINGERPRINT_RESCUE_MARGIN without passing both thresholds is
+# judged by the fingerprint network alone, with the same thresholds (real photos of the Pi, 21/11/2026: a lowercase
+# fingerprint at a margin of 19 and a fit of -22.6 by the word networks, 27.7 and +0.6 by the fingerprint network;
+# the word lines of the same photos at -20 or below for all three). The fingerprint network is loaded only then.
+FINGERPRINT_RESCUE_MARGIN = 12.0
 
 # The fingerprint line is checked against the FINGERPRINT_CANDIDATES most
 # probable valid seeds of the readings (every reading order, network and
 # layout), in order of rank: the first one whose fingerprint matches (see
 # fingerprint.MIN_MATCH_PROBABILITY) is the seed written, every word certain.
 # When none matches, the seed is never called wrong (a word or a digit may be
-# misread): every word is uncertain. FINGERPRINT_COST: computation of one fingerprint on a Pi
+# misread): every word is uncertain. With 3 candidates and the threshold of
+# fingerprint.py, a wrong seed is verified by chance with a probability of at
+# most 1e-6 per photo (the right seed was among the first 3 on all but 6 of
+# 1 698 pages with a fingerprint read, 21/11/2026). FINGERPRINT_COST: computation of one fingerprint on a Pi
 # Zero (PBKDF2-HMAC-SHA512, 2048 rounds, 0.062 s; master key and HASH160,
 # 0.005 s; measured with embit on 20/11/2026) and its check, seconds.
-FINGERPRINT_CANDIDATES = 16
+FINGERPRINT_CANDIDATES = 3
 FINGERPRINT_COST = 0.1
 
 # Guards of a valid seed (see guard), chosen on simulated pages kept apart
@@ -636,7 +644,15 @@ def is_fingerprint(crop: Image.Image) -> bool:
         True if the line on `crop` reads as a fingerprint rather than a word
         (see FINGERPRINT_MARGIN).
     """
-    return fingerprint_accepted(fingerprint_margins(crop))
+    found = fingerprint_margins(crop)
+    if fingerprint_accepted(found):
+        return True
+    if found is None or sum(m for m, _ in found) / len(found) < FINGERPRINT_RESCUE_MARGIN:
+        return False
+    # near the threshold: the fingerprint network has the last word, with the same thresholds
+    _, decoder, _ = load_engine()
+    log_probs = fingerprint_network().log_probs(normalize_word(crop))
+    return fingerprint_accepted([fingerprint.margins(log_probs, decoder.scores(log_probs))])
 
 
 
@@ -725,7 +741,10 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
         The words are found by the detector (detector.find_words) and read;
         a valid seed then goes through the guards (see guard), and a
         fingerprint line written with the words is checked
-        (check_fingerprint).
+        (check_fingerprint). A reading neither verified nor valid is tried
+        again without the words that may be scribbled over (see
+        detector.CROSSED_OUT); the second one is kept if it is verified, or
+        else has a better status, or else a more probable seed.
     """
     progress = Progress(progress or (lambda fraction: None), detector.DETECTOR_COST + 12 * (WORD_COST + OTHER_WORD_COST))
     if not _engine:
@@ -733,19 +752,46 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
         load_engine()
         progress.step(LOAD_COST)
     gray = image.convert("L")
-    pool = []
+    detector._detections.clear()
 
     def spare_line(crop):
         progress.step(WORD_COST + OTHER_WORD_COST)
         return is_fingerprint(crop)
 
-    reading, _, not_found = search(detector.find_words, gray, progress, on_word, pool, spare_line)
+    def attempt(crossed: bool):
+        pool = []
+
+        def find(image, step, fingerprint):
+            return detector.find_words(image, step, fingerprint=fingerprint, crossed=crossed)
+
+        reading, _, not_found = search(find, gray, progress, on_word, pool, spare_line)
+        if reading is None:
+            return None, not_found
+        if reading.analyze().status == "valid":
+            guard(reading)
+        if reading.fingerprint_crop is not None:
+            reading = check_fingerprint(reading, pool, progress)
+        return reading, None
+
+    def rank(reading):
+        if reading is None:
+            return (False, -1, 0.0)
+        analysis = reading.analyze()
+        return (bool(getattr(reading, "verified", False)), STATUS_RANK[analysis.status], analysis.confidence)
+
+    try:
+        reading, not_found = attempt(False)
+        if not (reading is not None and (getattr(reading, "verified", False)
+                                                           or reading.analyze().status == "valid")):
+            # neither verified nor valid: a second search without the words that may be scribbled over (see
+            # detector.CROSSED_OUT), kept if it reads better
+            other, _ = attempt(True)
+            if rank(other) > rank(reading):
+                reading = other
+    finally:
+        detector._detections.clear()
     if reading is None:
         raise not_found
-    if reading.analyze().status == "valid":
-        guard(reading)
-    if reading.fingerprint_crop is not None:
-        reading = check_fingerprint(reading, pool, progress)
     progress.report(1.0)
     return reading
 
@@ -800,3 +846,5 @@ def check_fingerprint(reading: SeedReading, pool: list, progress: Progress) -> S
     verified.verified = True
     verified.numbered = reading.numbered
     return verified
+
+

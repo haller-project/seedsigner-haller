@@ -5,7 +5,7 @@ from gettext import gettext as _
 from typing import Callable
 from PIL import Image, ImageDraw
 
-from seedsigner.gui.components import Button, Fonts, GUIConstants
+from seedsigner.gui.components import Button, FontAwesomeIconConstants, Fonts, GUIConstants, SeedSignerIconConstants
 from seedsigner.hardware.buttons import HardwareButtonsConstants
 from seedsigner.hardware.camera import Camera
 from seedsigner.helpers.l10n import mark_for_translation as _mft
@@ -23,7 +23,12 @@ class HandwrittenScanScreen(BaseScreen):
     `Camera.decode_frame()`); KEY_LEFT returns RET_CODE__BACK_BUTTON.
 
     The preview comes from the camera that takes the photo and shows its whole field of
-    view, so the photo is the framed image, taken without delay after the click.
+    view, as large as the display allows: what is photographed is exactly what is shown.
+    The controls are shown by two icons, without text, in the bands left free beside the
+    image: a back arrow on the side of the joystick, a camera on the side of the buttons,
+    which turns to the accent color when the photo is being taken. When the image is
+    wider than tall they go in the band below it. Nothing covers the image. The photo is
+    taken without delay after the click.
     """
     # Full resolution of the OV5647 sensor; the sensor only provides it at up to 15fps,
     # and the framerate also caps the exposure time (1/15s instead of 1/24s in dim light).
@@ -41,22 +46,42 @@ class HandwrittenScanScreen(BaseScreen):
 
         self.camera.start_single_frame_mode(resolution=self.PHOTO_RESOLUTION, framerate=self.PHOTO_FRAMERATE)
 
-        self.instructions_font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.get_button_font_size())
+        self.back_icon_font = Fonts.get_font(GUIConstants.ICON_FONT_NAME__SEEDSIGNER, GUIConstants.ICON_FONT_SIZE, file_extension="otf")
+        self.camera_icon_font = Fonts.get_font(GUIConstants.ICON_FONT_NAME__FONT_AWESOME, GUIConstants.ICON_FONT_SIZE - 2)
 
 
-    def _render_instructions(self, text: str, color: str):
-        self.renderer.draw.text(
-            xy=(
-                int(self.canvas_width/2),
-                self.canvas_height - GUIConstants.EDGE_PADDING
-            ),
-            text=text,
-            fill=color,
-            font=self.instructions_font,
-            stroke_width=4,
-            stroke_fill=GUIConstants.BACKGROUND_COLOR,
-            anchor="ms"
-        )
+    def fit_display(self, frame: Image.Image) -> tuple[Image.Image, tuple[int, int]]:
+        """
+        The whole `frame`, scaled to the largest size that fits in the display, and the
+        position that centers it.
+        """
+        scale = min(self.canvas_width / frame.width, self.canvas_height / frame.height)
+        width, height = round(frame.width * scale), round(frame.height * scale)
+        return frame.resize((width, height)), ((self.canvas_width - width) // 2, (self.canvas_height - height) // 2)
+
+
+    def _render_frame(self, frame: Image.Image, camera_color: str):
+        """
+        Draws the whole `frame`, the back icon in the band on its left and the camera
+        icon, in `camera_color`, in the band on its right; both side by side in the band
+        below a frame wider than tall.
+        """
+        image, (x, y) = self.fit_display(frame)
+        self.renderer.draw.rectangle((0, 0, self.canvas_width, self.canvas_height), fill=GUIConstants.BACKGROUND_COLOR)
+        self.renderer.canvas.paste(image, (x, y))
+
+        if x > 0:
+            back_center = (x // 2, self.canvas_height // 2)
+            camera_center = (x + image.width + (self.canvas_width - x - image.width) // 2, self.canvas_height // 2)
+        else:
+            band_center = (y + image.height + self.canvas_height) // 2
+            back_center = (self.canvas_width // 4, band_center)
+            camera_center = (self.canvas_width * 3 // 4, band_center)
+
+        self.renderer.draw.text(back_center, SeedSignerIconConstants.BACK, fill=GUIConstants.BODY_FONT_COLOR,
+                                font=self.back_icon_font, anchor="mm")
+        self.renderer.draw.text(camera_center, FontAwesomeIconConstants.CAMERA, fill=camera_color,
+                                font=self.camera_icon_font, anchor="mm")
 
 
     def _capture_photo(self) -> bytes:
@@ -70,6 +95,7 @@ class HandwrittenScanScreen(BaseScreen):
         # If the user continues holding the button that brought them into this screen,
         # it must not take the photo: only a click after all buttons were released does.
         is_maybe_still_holding = True
+        frame = None
 
         while True:
             if self.hw_inputs.check_for_low(HardwareButtonsConstants.KEY_LEFT):
@@ -84,21 +110,16 @@ class HandwrittenScanScreen(BaseScreen):
             elif not is_maybe_still_holding:
                 self.hw_inputs.update_last_input_time()
 
-                with self.renderer.lock:
-                    self._render_instructions(_("Capturing image..."), GUIConstants.ACCENT_COLOR)
-                    self.renderer.show_image()
+                if frame is not None:
+                    with self.renderer.lock:
+                        self._render_frame(frame, GUIConstants.ACCENT_COLOR)
+                        self.renderer.show_image()
 
                 return self._capture_photo()
 
             frame = self.camera.read_single_frame_preview(self.PREVIEW_RESOLUTION)
-
-            # The whole frame, fitted to the display height, so that nothing outside of
-            # the preview is in the photo
-            width = round(frame.width * self.canvas_height / frame.height)
             with self.renderer.lock:
-                self.renderer.draw.rectangle((0, 0, self.canvas_width, self.canvas_height), fill=GUIConstants.BACKGROUND_COLOR)
-                self.renderer.canvas.paste(frame.resize((width, self.canvas_height)), ((self.canvas_width - width) // 2, 0))
-                self._render_instructions("< " + _("back") + "  |  " + _("click a button"), GUIConstants.BODY_FONT_COLOR)
+                self._render_frame(frame, GUIConstants.BODY_FONT_COLOR)
                 self.renderer.show_image()
 
 

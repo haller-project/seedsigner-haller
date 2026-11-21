@@ -17,12 +17,16 @@ class WordsNotFound(Exception):
         probably cut off by the frame.
         `line_count`: number of lines found in the list, if any.
         `card`: the words are those of a card, part of which is out of the photo.
+        `small`: no word was found but faint writing too small to be read was
+        seen: the camera should come closer.
     """
-    def __init__(self, message: str, at_edge: bool = False, line_count: int = 0, card: bool = False):
+    def __init__(self, message: str, at_edge: bool = False, line_count: int = 0, card: bool = False,
+                 small: bool = False):
         super().__init__(message)
         self.at_edge = at_edge
         self.line_count = line_count
         self.card = card
+        self.small = small
 
 
 
@@ -106,12 +110,14 @@ def spare_lines(columns: list[list[tuple[int, int, int, int]]]) -> list[tuple[in
     """
         (column, line) of the lines of a list that may be a fingerprint
         written with the words, when the list has one line more than a valid
-        number of words: the first line of the list and the last line of
-        each column. With two columns, only lines whose removal leaves two
-        columns of the same length.
+        number of words: the first line of the list, the last line of each
+        column, then the first line of the other columns (a fingerprint at
+        the head of the second column). With two columns or more, only lines
+        whose removal leaves columns of the same length.
     """
     found = []
-    for c, i in [(0, 0)] + [(c, len(column) - 1) for c, column in enumerate(columns)]:
+    for c, i in [(0, 0)] + [(c, len(column) - 1) for c, column in enumerate(columns)] \
+            + [(c, 0) for c in range(1, len(columns))]:
         lengths = [len(column) - (j == c) for j, column in enumerate(columns)]
         if (c, i) not in found and (len(columns) == 1 or len(set(x for x in lengths if x)) == 1):
             found.append((c, i))

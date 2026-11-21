@@ -67,3 +67,16 @@ def test_slanted_rows_followed_box_to_box():
 def test_words_not_found_small():
     e = page.WordsNotFound("words too small", small=True)
     assert e.small and not e.at_edge and e.line_count == 0
+
+
+def test_first_pass_box_moved_to_the_region():
+    # whole photo seen at scale 0.1, region from (100, 200) seen at scale 0.25 (output pixels: half the input)
+    first = object.__new__(detector.Detection)
+    first.words = [box(10, 30, 20, h=4)]
+    first.to_photo = lambda points: [(2 * u / 0.1, 2 * v / 0.1) for u, v in points]
+    det = object.__new__(detector.Detection)
+    det.first = first
+    det.from_photo = lambda points: [((x - 100) * 0.25 / 2, (y - 200) * 0.25 / 2) for x, y in points]
+    (moved,) = detector.first_pass_words(det)
+    # photo: along 200-600, across 400 ; region output: along (200-100)*0.125 = 12.5 .. 62.5, across 25
+    assert (moved.a0, moved.a1, moved.c, moved.h) == pytest.approx((12.5, 62.5, 25.0, 10.0))

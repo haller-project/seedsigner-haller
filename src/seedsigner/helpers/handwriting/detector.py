@@ -335,6 +335,8 @@ class Detection:
         self.maps = maps
         self.to_photo = to_photo
         self.frame = frame  # outward normal of a side of the photo: its position across, in output pixels
+        self.from_photo = None  # photo pixels to output pixels (set by detect)
+        self.first = None  # detection on the whole photo when this one is on the document region (detections)
         words, numbers = sigmoid(maps[WORD]), sigmoid(maps[NUMBER])
         word_kernels = [p for p in components(maps[WORD] > 0) if len(p) >= MIN_KERNEL_PIXELS]
         number_kernels = [p for p in components(maps[NUMBER] > 0) if len(p) >= MIN_KERNEL_PIXELS]
@@ -406,8 +408,35 @@ def detect(photo: Image.Image, region: tuple[int, int, int, int] | None = None) 
     sides = {(0, -1): (y0 <= 0, -oy / 2), (0, 1): (y1 >= photo.height, (oy + h) / 2),
              (-1, 0): (x0 <= 0, -ox / 2), (1, 0): (x1 >= photo.width, (ox + w) / 2)}
     frame = {n: at for n, (on, at) in sides.items() if on}
-    return Detection(network_maps(image),
-                     lambda points: [((2 * u - ox) / s + x0, (2 * v - oy) / s + y0) for u, v in points], frame)
+    det = Detection(network_maps(image),
+                    lambda points: [((2 * u - ox) / s + x0, (2 * v - oy) / s + y0) for u, v in points], frame)
+    det.from_photo = lambda points: [(((x - x0) * s + ox) / 2, ((y - y0) * s + oy) / 2) for x, y in points]
+    return det
+
+
+
+def first_pass_words(det: Detection) -> list[Box]:
+    """
+        Word boxes of the detection on the whole photo (`det.first`) moved to
+        the output pixels of `det` (detection on the document region): both
+        map the photo by a scale and an offset, so a box keeps its direction
+        and its extents scale by the ratio of the two. Empty without a first
+        detection.
+    """
+    first = det.first
+    if first is None or det.from_photo is None:
+        return []
+    (x0, y0), (x1, y1) = det.from_photo(first.to_photo([(0.0, 0.0), (1.0, 0.0)]))
+    k = math.hypot(x1 - x0, y1 - y0)
+    moved = []
+    for b in first.words:
+        if b.score <= 0:
+            continue
+        m = copy_box(b)
+        m.a0, m.a1, m.c, m.h = k * b.a0 + x0 * b.ux + y0 * b.uy, k * b.a1 + x0 * b.ux + y0 * b.uy, \
+            k * b.c - x0 * b.uy + y0 * b.ux, k * b.h
+        moved.append(m)
+    return moved
 
 
 
@@ -1271,7 +1300,8 @@ def detections(image: Image.Image, step) -> Detection:
         step(DETECTOR_COST)
         region = document_region(det, image.size)
         if region:
-            det = detect(image, region)
+            first, det = det, detect(image, region)
+            det.first = first
             step(DETECTOR_COST)
         _detections[key] = det
     return _detections[key]
@@ -1466,6 +1496,11 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         # counted by its numbers too) is tried as the fingerprint before it is taken for a word left out
         left = [copy_box(b) for b in det.words if b.score > 0 and det.card_of(b.center) in (g, -1)
                 and not any(covers(line, b.center) for line in lines)]
+        # boxes of the detection on the whole photo that the detection on the document region missed (a line of
+        # digits seen only at the lower resolution), for the fingerprint only
+        left += [b for b in first_pass_words(det) if det.card_of(b.center) in (g, -1)
+                 and not any(covers(line, b.center) for line in lines)
+                 and not any(covers(w, b.center) or covers(b, w.center) for w in det.words)]
         h = float(np.median([b.h for b in lines]))
         tried = sorted((line for column in group_lines(left) for line in column
                         if (line.a1 - line.a0) >= FINGERPRINT_MIN_LENGTH * h),

@@ -79,6 +79,7 @@ GRID_WORD_GAP = 0.9           # gap along a row above which two pieces are two w
 MIN_GRID_ROWS_SHARE = 0.75    # share of the rows of a grid holding its full number of words
 PIECE_GAP = 0.0               # gap between boxes (with their margins) above which two pieces may be two words
                               # of aligned columns: a blank of half a height
+MIN_CUT_LENGTH = 1.2          # length of each part of a piece cut at the start of the next column (aligned_columns)
 ALIGNMENT = 1.0               # largest step between the sorted starts of the words of a column (a slanted page
                               # makes them drift)
 MIN_WORD_LENGTH = 2.0         # median length of the words of a column, numbers written against them included
@@ -101,6 +102,10 @@ MAX_NUMBER = 33
 NUMBER_TRUST = 0.7            # a number reading is right with this probability, otherwise any value
 MIN_NUMBERS_READ = 3          # numbers read before an order may be decided by them
 ORDER_MARGIN = math.log(1e4)  # log-likelihood lead of the best order over the others
+MIN_ROW_WORDS = 3             # words of each row but the last of words written in rows (row_words)
+MIN_ROW_WORD_LENGTH = 1.2     # length of every word written in rows (three letters at least), in heights
+BAND_GAP = 1.2                # largest gap between two lines of every column, at the same row, above this many
+                              # median line spacings: the page may be two bands read one after the other
 
 # Orientation: the tallest ORIENTATION_WORDS words are read in both directions; the page is upside down if the
 # turned readings lead by ORIENTATION_MARGIN (summed log-likelihoods per unit of width)
@@ -663,6 +668,27 @@ def aligned_columns(boxes: list[Box]) -> list[list[Box]] | None:
     columns = [min(a for a, _ in c) for c in clusters if len({i for _, i in c}) >= MIN_GRID_ROWS_SHARE * len(rows)]
     if len(columns) < 2:
         return None
+    # a piece running over the start of the next column (a word of the left column merged with the number and the
+    # word written against it) is cut there: the left part ends halfway between the usual end of the words of its
+    # column and the start of the next one, the right part starts with the words of the next column
+    for j in range(1, len(columns)):
+        ends = [p.a1 for row in pieces for p in row
+                if columns[j - 1] - ALIGNMENT * h <= p.a0 <= columns[j - 1] + ALIGNMENT * h and p.a1 < columns[j]]
+        if not ends:
+            continue
+        cut = (float(np.median(ends)) + columns[j]) / 2
+        for r, row in enumerate(pieces):
+            out = []
+            for p in row:
+                if p.a0 < cut - MIN_CUT_LENGTH * h and p.a1 > columns[j] + MIN_CUT_LENGTH * h:
+                    for a0, a1 in ((p.a0, cut), (columns[j], p.a1)):
+                        piece = copy_box(p)
+                        piece.a0, piece.a1 = a0, a1
+                        piece.pixels = max(1, int(round(p.pixels * (a1 - a0) / (p.a1 - p.a0))))
+                        out.append(piece)
+                else:
+                    out.append(p)
+            pieces[r] = out
     grid = []
     for row in pieces:
         cells = {}
@@ -682,6 +708,43 @@ def aligned_columns(boxes: list[Box]) -> list[list[Box]] | None:
     if any(np.median([b.a1 - b.a0 for b in column]) < MIN_WORD_LENGTH * h for column in out):
         return None
     return out
+
+
+
+def row_words(boxes: list[Box]) -> list[list[Box]] | None:
+    """
+        Words written one after the other along a few rows, without columns
+        (« wide toss supply version motor / pupil toy … »): rows of boxes on
+        the same line, split into words where the gap exceeds GRID_WORD_GAP
+        heights, read left to right, row after row. Every row but the last
+        holds at least MIN_ROW_WORDS words and every word is at least
+        MIN_ROW_WORD_LENGTH heights long. The rows, as lists of words, or None.
+    """
+    if len(boxes) < MIN_ROW_WORDS:
+        return None
+    boxes = [copy_box(b) for b in boxes]
+    h = float(np.median([b.h for b in boxes]))
+    rows = []
+    for b in sorted(boxes, key=lambda b: b.c):
+        if rows and abs(b.c - np.mean([x.c for x in rows[-1]])) < SAME_LINE * max(h, b.h):
+            rows[-1].append(b)
+        else:
+            rows.append([b])
+    words = []
+    for row in rows:
+        row.sort(key=lambda b: b.a0)
+        merged = [row[0]]
+        for b in row[1:]:
+            if b.a0 - merged[-1].a1 > GRID_WORD_GAP * h or stacked(merged[-1], b):
+                merged.append(b)
+            else:
+                merged[-1].merge(b)
+        words.append(merged)
+    if any(len(r) < MIN_ROW_WORDS for r in words[:-1]):
+        return None
+    if any(b.a1 - b.a0 < MIN_ROW_WORD_LENGTH * h for r in words for b in r):
+        return None
+    return words
 
 
 
@@ -928,6 +991,9 @@ def anchored_slots(det: Detection, words: list[Box], numbers: list[Box]) -> dict
     grid_orders = [list(range(len(flat)))]
     if len(grid) > 1:
         grid_orders.append([int(starts[k] + r) for r in range(rows) for k in range(len(grid)) if r < len(grid[k])])
+        banded = band_order([[s[2] for s in column] for column in grid])
+        if banded is not None and banded not in grid_orders:
+            grid_orders.append(banded)
     index = {i: j for j, i in enumerate(i for i, s in enumerate(flat) if s[1])}
     orders = []
     for order in grid_orders:
@@ -1001,10 +1067,35 @@ def number_probabilities(photo: Image.Image, quad: list, fill: int) -> np.ndarra
 
 
 
-def candidate_orders(columns: list[list[Box]]) -> list[list[int]]:
+def band_order(columns: list[list[Box]]) -> list[int] | None:
+    """
+        Column by column within two bands of lines read one after the other
+        (two columns of 3 words above two columns of 3 words: 1-3 | 4-6, then
+        7-9 | 10-12), word indices numbered column by column. The columns have
+        the same number of lines, and each one has its largest gap between
+        two lines at the same row, more than BAND_GAP times its median line
+        spacing: the bands are split there. None otherwise.
+    """
+    if len(columns) < 2 or len({len(c) for c in columns}) > 1 or len(columns[0]) < 4:
+        return None
+    cut = None
+    for c in columns:
+        gaps = [b.c - a.c for a, b in zip(c, c[1:])]
+        k = int(np.argmax(gaps))
+        if gaps[k] <= BAND_GAP * float(np.median(gaps)) or cut not in (None, k):
+            return None
+        cut = k
+    rows = len(columns[0])
+    return [k * rows + r for band in (range(cut + 1), range(cut + 1, rows)) for k in range(len(columns)) for r in band]
+
+
+
+def candidate_orders(columns: list[list[Box]], bands: bool = False) -> list[list[int]]:
     """
         Column by column, then row by row when there are several columns (word
-        indices numbered column by column).
+        indices numbered column by column), then, with `bands` (numbered
+        lines, which tell the order), column by column within bands
+        (band_order) when the page is split into bands.
     """
     count = sum(len(c) for c in columns)
     orders = [list(range(count))]
@@ -1014,6 +1105,9 @@ def candidate_orders(columns: list[list[Box]]) -> list[list[int]]:
         by_rows = [int(starts[k] + r) for r in range(rows) for k in range(len(columns)) if r < len(columns[k])]
         if by_rows != orders[0]:
             orders.append(by_rows)
+        banded = band_order(columns) if bands else None
+        if banded is not None and banded not in orders:
+            orders.append(banded)
     return orders
 
 
@@ -1202,6 +1296,12 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         aligned = aligned_columns(groups[g])
         if aligned is not None and sum(len(c) for c in aligned) in page.SEED_LENGTHS:
             columns, count = aligned, sum(len(c) for c in aligned)
+    in_rows = False
+    if g < 0 and anchored is None and count not in page.SEED_LENGTHS:
+        rows = row_words(groups[g])
+        if rows is not None and sum(len(r) for r in rows) in page.SEED_LENGTHS:
+            # words written in rows: each row is taken as a column, read in that order only
+            columns, count, in_rows = rows, sum(len(r) for r in rows), True
     if g < 0 and count not in page.SEED_LENGTHS and len(columns) > 1:
         # short columns mostly on the frame are text of another sheet
         kept = [c for c in columns if len(c) >= MIN_COLUMN_LINES
@@ -1286,7 +1386,8 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
                     last_number_needed = True
             else:
                 first_number_needed = True
-    orders = anchored["orders"] if anchored else candidate_orders(columns)
+    orders = anchored["orders"] if anchored else \
+        [list(range(count))] if in_rows else candidate_orders(columns, bands=len(linked) >= MIN_NUMBERS_READ)
     if turned:
         quads = [[q[2:] + q[:2] for q in variant] for variant in quads]
         orders = [list(reversed(o)) for o in orders]

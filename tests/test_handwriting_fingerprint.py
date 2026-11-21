@@ -140,15 +140,15 @@ def test_fingerprint_line_left_out_of_a_list():
     fingerprint crop; the 12 words are read. Above the words, the same. (A fingerprint of digits only, as
     04643705, is read less surely by the second network and may be kept as a line.) """
     from embit import bip39
-    from seedsigner.helpers.handwriting import page, read_seed
+    from seedsigner.helpers.handwriting import detector, page, read_seed
     words = bip39.mnemonic_from_bytes(bytes(random.Random(5).getrandbits(8) for _ in range(16))).split()
     fp = fingerprint.seed_fingerprint(words)
     for lines in (words + [fp], [fp] + words):
         photo = rendered_list(lines)
         with pytest.raises(page.WordsNotFound):
-            page.find_words(photo)
+            detector.find_words(photo)
         from seedsigner.helpers.handwriting import is_fingerprint
-        layout = page.find_words(photo, fingerprint=is_fingerprint)
+        layout = detector.find_words(photo, fingerprint=is_fingerprint)
         assert layout.count == 12 and layout.fingerprint is not None and layout.complete
         analysis = read_seed(photo).analyze()
         assert analysis.mnemonic == words and analysis.status == "valid"
@@ -158,10 +158,10 @@ def test_fingerprint_line_left_out_of_a_list():
 def test_word_line_never_left_out():
     """ A 13th line that is a word stays a word: the list is not a seed. """
     from embit import bip39
-    from seedsigner.helpers.handwriting import is_fingerprint, page
+    from seedsigner.helpers.handwriting import detector, is_fingerprint, page
     words = bip39.mnemonic_from_bytes(bytes(random.Random(8).getrandbits(8) for _ in range(16))).split()
     with pytest.raises(page.WordsNotFound):
-        page.find_words(rendered_list(words + ["decade"]), fingerprint=is_fingerprint)
+        detector.find_words(rendered_list(words + ["decade"]), fingerprint=is_fingerprint)
 
 
 

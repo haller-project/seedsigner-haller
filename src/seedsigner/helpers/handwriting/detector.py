@@ -48,7 +48,7 @@ from PIL import Image, ImageDraw
 from . import native
 from . import page
 from .page import WordLayout, WordsNotFound
-from .preprocess import normalize_word
+from .preprocess import erase_lines, normalize_word
 
 DETECTOR_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "resources", "handwriting",
                              "haller-1-detector.npz")
@@ -101,6 +101,9 @@ ORDER_MARGIN = math.log(1e4)  # log-likelihood lead of the best order over the o
 # turned readings lead by ORIENTATION_MARGIN (summed log-likelihoods per unit of width)
 ORIENTATION_WORDS = 3
 ORIENTATION_MARGIN = 1.0
+
+# Printed or ruled lines erased from the word crops (preprocess.erase_lines): on cards, on every document or None
+ERASE_LINES = "cards"
 
 # Word crops around the box, in box heights (horizontal, top, bottom): first reading, taller band, wider band
 CROP_VARIANTS = ((0.6, 0.85, 0.75), (0.6, 1.1, 1.0), (1.2, 0.8, 0.7))
@@ -725,12 +728,34 @@ def anchored_slots(det: Detection, words: list[Box], numbers: list[Box]) -> dict
                     and not any(on_line(w, n, followings[ci], SAME_LINE) for w in words)]
             if near:
                 extra.setdefault(min(near)[1], []).append(b)
+    # a word box on the lines of several numbers holds the words of all of them (words touching across lines): each
+    # number takes the part of it on its own line, of the height of the words on one line
+    found_of = {id(n): [b for b in words if on_line(b, n, followings[ci], SAME_LINE)] or extra.get(id(n), [])
+                for ci, column in enumerate(number_columns) for n in column}
+    users = {}
+    for n_id, found in found_of.items():
+        for b in found:
+            users.setdefault(id(b), []).append(n_id)
+    shared = {i for i, u in users.items() if len(u) > 1}
+    if shared:
+        single = [b.h for b in words if id(b) in users and id(b) not in shared]
+        by_id = {id(n): n for column in number_columns for n in column}
+        for n_id, found in found_of.items():
+            n = by_id[n_id]
+            parts = []
+            for b in found:
+                if id(b) in shared:
+                    b = copy_box(b)
+                    b.h = float(np.median(single)) if single else 1.5 * n.h
+                    b.c = n.c
+                parts.append(b)
+            found_of[n_id] = parts
     grid = []
     for ci, column in enumerate(number_columns):
         following = followings[ci]
         slots = []
         for n in column:
-            found = [b for b in words if on_line(b, n, following, SAME_LINE)] or extra.get(id(n), [])
+            found = found_of[id(n)]
             if found:
                 box = copy_box(found[0])
                 for b in found[1:]:
@@ -1058,7 +1083,8 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
                 break
 
     def crop(k, variant):
-        return rectified_crop(image, quads[variant][k], fill)
+        c = rectified_crop(image, quads[variant][k], fill)
+        return erase_lines(c) if ERASE_LINES == "all" or (ERASE_LINES == "cards" and g >= 0) else c
 
     kind = "list" if g < 0 else ("card24" if count > 12 else "card12")
     layout = WordLayout(kind, count, orders, len(CROP_VARIANTS), crop, lambda k: quads[0][k],

@@ -28,7 +28,7 @@ from . import detector, fingerprint
 from .checksum import Analysis, MIN_PLAUSIBLE_SEED, MIN_SEED_PROBABILITY
 from .decoder import number_probabilities
 from .page import WordsNotFound
-from .preprocess import normalize_word
+from .preprocess import normalize_word, unread_ink
 from .word_model import MODEL_PATH
 
 # Readings kept per word (the following ones are negligible)
@@ -111,21 +111,21 @@ FINGERPRINT_CANDIDATES = 16
 FINGERPRINT_COST = 0.1
 
 # Guards of a valid seed (see guard), chosen on simulated pages kept apart
-# from the tests:
+# from the tests and on the development half of the real photos:
 # * its probability is at least MIN_DETECTOR_SEED_PROBABILITY;
-# * the numbers of its first and last words do not contradict their positions
-#   (page upside down, order wrong);
 # * no handwritten word found by the detector with a box score of at least
 #   LEFT_OUT_SCORE and a length of at least LEFT_OUT_LENGTH heights was left
 #   out of the reading (another document, a word crossed out and rewritten);
 # * a word whose box is at least STRETCH times longer per letter of the word
 #   read than the median of the page is uncertain: part of it was probably
-#   not read (faded or broken letters, see stretched_words).
-MIN_DETECTOR_SEED_PROBABILITY = 0.99
-CHECK_NUMBERS = True
+#   not read (see stretched_words);
+# * a word with faint ink over UNREAD_INK heights of text beyond the part read
+#   is uncertain (faded or broken letters, see preprocess.unread_ink).
+MIN_DETECTOR_SEED_PROBABILITY = 0.9
 LEFT_OUT_SCORE = 0.8
 LEFT_OUT_LENGTH = 1.0
-STRETCH = 2.0
+STRETCH = 1.7
+UNREAD_INK = 1.8
 
 # Expected duration of the steps of a reading, in seconds on a Pi Zero (see
 # Progress): loading of the models, reading of a word by the first network
@@ -635,16 +635,19 @@ def stretched_words(reading: SeedReading) -> set[int]:
 def guard(reading: SeedReading):
     """
         Guards of a valid seed (see MIN_DETECTOR_SEED_PROBABILITY): every word
-        becomes uncertain if the numbers contradict the order or a handwritten
-        word was left out; stretched words become uncertain.
+        becomes uncertain if a handwritten word was left out; stretched words
+        and words with faint ink left unread become uncertain.
     """
     layout = reading.layout
-    if (CHECK_NUMBERS and layout.check(reading.order)) or any(
-            score >= LEFT_OUT_SCORE and length >= LEFT_OUT_LENGTH for score, length, _ in layout.extra_words):
+    if any(score >= LEFT_OUT_SCORE and length >= LEFT_OUT_LENGTH for score, length, _ in layout.extra_words):
         reading.mark_disputed()
         return
     reading.min_seed_probability = max(reading.min_seed_probability, MIN_DETECTOR_SEED_PROBABILITY)
     reading.doubtful |= stretched_words(reading)
+    for i, k in enumerate(reading.order):
+        crop = reading.reader.inks[(k, 0)][0] if (k, 0) in reading.reader.inks else layout.crop(k, 0)
+        if crop is not None and unread_ink(crop) >= UNREAD_INK:
+            reading.doubtful.add(i)
     reading._last = None
 
 

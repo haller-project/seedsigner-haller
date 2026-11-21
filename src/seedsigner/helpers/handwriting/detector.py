@@ -102,10 +102,6 @@ ORDER_MARGIN = math.log(1e4)  # log-likelihood lead of the best order over the o
 ORIENTATION_WORDS = 3
 ORIENTATION_MARGIN = 1.0
 
-# Check of the order of a valid seed (see number_contradicts)
-NUMBER_CHECK = 0.9
-NUMBER_CHECK_OTHER = 0.05
-
 # Word crops around the box, in box heights (horizontal, top, bottom): first reading, taller band, wider band
 CROP_VARIANTS = ((0.6, 0.85, 0.75), (0.6, 1.1, 1.0), (1.2, 0.8, 0.7))
 
@@ -887,20 +883,6 @@ def turned_by_reading(photo: Image.Image, quads: list, fill: int) -> bool:
 
 
 
-# ---------- checks of a valid seed ----------
-
-def number_contradicts(probabilities: np.ndarray | None, position: int) -> bool:
-    """
-        True if a number read with a probability of at least NUMBER_CHECK is
-        not `position` + 1, which it is given a probability of less than
-        NUMBER_CHECK_OTHER.
-    """
-    if probabilities is None or position >= len(probabilities):
-        return False
-    best = int(np.argmax(probabilities))
-    return best != position and probabilities[best] >= NUMBER_CHECK and probabilities[position] < NUMBER_CHECK_OTHER
-
-
 # ---------- reading ----------
 
 def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordLayout:
@@ -1079,12 +1061,4 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
     layout.numbers_linked = len(linked)
     layout.numbers_read = len(read_numbers)
     layout.anchored = anchored is not None
-
-    def check(order: list[int]) -> bool:
-        """
-            True if the number of the first or last word of a seed read in
-            `order` contradicts its position (page upside down or order wrong).
-        """
-        return any(number_contradicts(number(order[i]), i) for i in {0, len(order) - 1} if order[i] in linked)
-    layout.check = check
     return layout

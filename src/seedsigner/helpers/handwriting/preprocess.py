@@ -194,3 +194,116 @@ def unread_ink(line: Image.Image, share: float = 0.14) -> float:
     if columns is None or pale is None:
         return 0.0
     return max(0, columns[0] - pale[0], pale[-1] - columns[-1]) / max(height, 1)
+
+
+
+# Printed or ruled lines in a word crop (erase_lines)
+LINE_SLOPES = np.linspace(-0.18, 0.18, 37)  # slopes tried, about +-10 degrees
+LINE_COVER = 0.6              # share of the columns a line crosses
+LINE_RUN = 0.35               # share of the width of its longest unbroken stretch
+MAX_LINES = 3
+LINE_DRIFT = 1.5              # rows over the width from which a line is erased here
+
+
+def find_lines(faint: np.ndarray, max_thickness: int) -> list[tuple[float, float]]:
+    """
+        Straight thin lines of `faint` (ink mask) crossing most of its width,
+        as (slope, row at the middle column), longest first; at most MAX_LINES.
+    """
+    h, w = faint.shape
+    ys, xs = np.nonzero(faint)
+    if len(xs) == 0:
+        return []
+    found, taken = [], np.zeros(len(xs), bool)
+    for _ in range(MAX_LINES):
+        best = None
+        for s in LINE_SLOPES:
+            r = np.round(ys - s * (xs - w / 2)).astype(int) + w
+            hits = np.zeros((h + 2 * w + 2, w), bool)
+            keep = ~taken
+            hits[r[keep], xs[keep]] = True
+            near = hits.copy()
+            near[1:] |= hits[:-1]
+            near[:-1] |= hits[1:]
+            cover = near.sum(1)
+            k = int(np.argmax(cover))
+            if best is None or cover[k] > best[0]:
+                best = (cover[k], s, k, near[k])
+        cover, s, k, row = best
+        if cover < LINE_COVER * w:
+            break
+        breaks = np.flatnonzero(np.diff(np.concatenate([[0], row.astype(np.int8), [0]])))
+        if (breaks[1::2] - breaks[::2]).max() < LINE_RUN * w:
+            break
+        y = k - w
+        # a line is thin: most of the columns it crosses are paper a little above and below it
+        cols = np.flatnonzero(row)
+        side = []
+        for d in (-max_thickness - 2, max_thickness + 2):
+            yy = np.round(y + d + s * (cols - w / 2)).astype(int)
+            inside = (yy >= 0) & (yy < h)
+            side.append(np.where(inside, faint[np.clip(yy, 0, h - 1), cols], False))
+        if (side[0] & side[1]).mean() > 0.3:
+            break
+        found.append((float(s), float(y)))
+        taken |= np.abs(ys - s * (xs - w / 2) - y) <= max_thickness
+    return found
+
+
+def erase_lines(line: Image.Image) -> Image.Image:
+    """
+        `line` (grayscale word crop) reduced as in normalize_word, with the
+        straight printed or ruled lines crossing it (find_lines) that drift by
+        LINE_DRIFT rows or more over its width replaced by the paper, column by
+        column; strokes crossing a line from above to below are kept. Lines
+        closer to the horizontal are left to normalize_word. Returned unchanged
+        if no such line is found.
+    """
+    line = line.convert("L")
+    if line.height > WORKING_HEIGHT:
+        line = line.reduce(-(-line.height // WORKING_HEIGHT))
+    a = np.asarray(line, np.float32)
+    h, w = a.shape
+    if w < 24:
+        return line
+    background = box_mean(a, max(4, h // 4))
+    ink = np.clip((background - a) / np.maximum(0.5 * background, 1), 0, 1)
+    strongest = np.percentile(ink, 99.5)
+    if strongest < 0.08:
+        return line
+    faint = ink > 0.5 * max(0.06, 0.35 * strongest)
+    max_thickness = max(2, int(round(0.08 * h)))
+    lines = [(s, y) for s, y in find_lines(faint, max_thickness) if abs(s) * w >= LINE_DRIFT]
+    if not lines:
+        return line
+    a = a.copy()
+    for s, y in lines:
+        centers = np.round(y + s * (np.arange(w) - w / 2)).astype(int)
+        runs = []
+        for x, c in enumerate(centers):
+            c = next((c + d for d in (0, -1, 1) if 0 <= c + d < h and faint[c + d, x]), None)
+            if c is None:
+                runs.append(None)
+                continue
+            u, d = c, c
+            while u > 0 and faint[u - 1, x]:
+                u -= 1
+            while d < h - 1 and faint[d + 1, x]:
+                d += 1
+            runs.append((c, u, d))
+        lengths = [d - u + 1 for r in runs if r for _, u, d in [r]]
+        thick = int(np.median([n for n in lengths if n <= 2 * max_thickness] or [max_thickness]))
+        half = thick // 2 + 1
+        for x, r in enumerate(runs):
+            if r is None:
+                continue
+            c, u, d = r
+            top, bottom = max(0, c - half), min(h - 1, c + half)
+            if d - u + 1 <= thick + 2:
+                top, bottom = u, d
+            elif u < top and d > bottom:
+                continue  # a stroke crosses the line
+            above, below = max(0, top - 2), min(h - 1, bottom + 2)
+            paper = max(a[above, x], a[below, x], float(background[top:bottom + 1, x].max()))
+            a[top:bottom + 1, x] = paper
+    return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))

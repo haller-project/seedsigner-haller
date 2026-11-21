@@ -87,6 +87,7 @@ MIN_COLUMN_LINES = 3          # a column of fewer lines mostly on the frame is t
 MIN_ANCHOR_NUMBERS = 6        # numbers of a document above which its slots are anchored on them
 WRITTEN = 0.5                 # word probability in an empty slot above which it holds a missed word
 SLOT_LENGTH = 8.0             # length of a slot with no word found, in number heights
+SLOT_SLACK = 1.8              # a word off every number line goes to a free slot this many times SAME_LINE away
 NUMBER_WORD_GAP = 0.15        # start of a slot word after the end of its number, in number heights
 LINK_THRESHOLD = 0.3          # mean link probability along a number-word segment
 NUMBER_GAP = 3.0              # word heights between a number and its word, without link
@@ -702,13 +703,28 @@ def anchored_slots(det: Detection, words: list[Box], numbers: list[Box]) -> dict
         return None
     number_columns.sort(key=lambda c: min(n.a0 for n in c))
     starts = [min(n.a0 for n in c) for c in number_columns]
+    def on_line(b, n, following, tolerance):
+        return abs(b.c - n.c) < tolerance * max(b.h, n.h) and b.a1 > n.a1 and b.middle < following - 0.3 * n.h
+
+    # words on the line of their number; a word left over goes to the nearest number with no word on its line
+    # within SLOT_SLACK times that distance (words written above or below the printed line)
+    followings = [starts[ci + 1] if ci + 1 < len(number_columns) else math.inf for ci in range(len(number_columns))]
+    taken = {id(b) for ci, column in enumerate(number_columns) for n in column for b in words
+             if on_line(b, n, followings[ci], SAME_LINE)}
+    extra = {}
+    for b in words:
+        if id(b) not in taken:
+            near = [(abs(b.c - n.c), id(n)) for ci, column in enumerate(number_columns) for n in column
+                    if on_line(b, n, followings[ci], SLOT_SLACK * SAME_LINE)
+                    and not any(on_line(w, n, followings[ci], SAME_LINE) for w in words)]
+            if near:
+                extra.setdefault(min(near)[1], []).append(b)
     grid = []
     for ci, column in enumerate(number_columns):
-        following = starts[ci + 1] if ci + 1 < len(number_columns) else math.inf
+        following = followings[ci]
         slots = []
         for n in column:
-            found = [b for b in words if abs(b.c - n.c) < SAME_LINE * max(b.h, n.h) and b.a1 > n.a1
-                     and b.middle < following - 0.3 * n.h]
+            found = [b for b in words if on_line(b, n, following, SAME_LINE)] or extra.get(id(n), [])
             if found:
                 box = copy_box(found[0])
                 for b in found[1:]:
@@ -925,7 +941,13 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
                 other = group_lines([copy_box(b) for b in kept])
                 if sum(len(c) for c in other) in page.SEED_LENGTHS:
                     groups[g], columns, n = kept, other, sum(len(c) for c in other)
-        candidates.append((n in page.SEED_LENGTHS, n, g, columns))
+        if n not in page.SEED_LENGTHS and len(number_groups.get(g, [])) >= MIN_ANCHOR_NUMBERS:
+            # the numbers give the count of a document whose words are split or merged
+            anchored = anchored_slots(det, boxes, number_groups[g])
+            if anchored and anchored["count"] in page.SEED_LENGTHS:
+                n = anchored["count"]
+        cut = g >= 0 and bool(det.cut_sides(g))
+        candidates.append((n in page.SEED_LENGTHS, not cut, n, g, columns))
 
     for g, boxes in list(groups.items()):
         if len(boxes) >= MIN_GROUP_WORDS:
@@ -939,9 +961,12 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
             candidates = [candidates[-1]]
     if not candidates:
         raise WordsNotFound("no words found")
-    candidates.sort(key=lambda m: (m[0], m[1]), reverse=True)
-    _, count, g, columns = candidates[0]
-    ambiguous = any(m[1] >= MIN_OTHER_WORDS for m in candidates[1:])
+    # a card cut by the frame is read only if no whole document has a valid number of words, and does not make
+    # the reading of another one uncertain
+    candidates.sort(key=lambda m: m[:3], reverse=True)
+    _, _, count, g, columns = candidates[0]
+    count = sum(len(c) for c in columns)
+    ambiguous = any(m[2] >= MIN_OTHER_WORDS and m[1] for m in candidates[1:])
     anchored = None
     if len(number_groups.get(g, [])) >= MIN_ANCHOR_NUMBERS:
         anchored = anchored_slots(det, groups[g], number_groups[g])

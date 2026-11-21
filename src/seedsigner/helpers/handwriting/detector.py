@@ -141,11 +141,11 @@ def network_maps(image: np.ndarray) -> np.ndarray:
 
 
 
-def reduce_photo(photo: Image.Image) -> tuple[np.ndarray, float, tuple[int, int]]:
+def reduce_photo(photo: Image.Image) -> tuple[np.ndarray, float, tuple[int, int], tuple[int, int]]:
     """
         Photo fitted into the input of the network, aspect kept, padded with its
         median gray: (image, scale from the photo to the input, offset of the
-        photo in the input).
+        photo in the input, its size there).
     """
     width, height = native.DETECTOR_SIZE
     s = min(width / photo.width, height / photo.height)
@@ -154,7 +154,7 @@ def reduce_photo(photo: Image.Image) -> tuple[np.ndarray, float, tuple[int, int]
     canvas = Image.new("L", (width, height), int(np.median(np.asarray(small))))
     offset = ((width - w) // 2, (height - h) // 2)
     canvas.paste(small, offset)
-    return np.asarray(canvas), s, offset
+    return np.asarray(canvas), s, offset, (w, h)
 
 
 
@@ -278,10 +278,10 @@ class Detection:
         (pixels of each card kernel component), card area. `to_photo(points)`
         maps output pixels to photo pixels.
     """
-    def __init__(self, maps: np.ndarray, to_photo, frame=((0, -1), (0, 1), (-1, 0), (1, 0))):
+    def __init__(self, maps: np.ndarray, to_photo, frame: dict):
         self.maps = maps
         self.to_photo = to_photo
-        self.frame = frame
+        self.frame = frame  # outward normal of a side of the photo: its position across, in output pixels
         words, numbers = sigmoid(maps[WORD]), sigmoid(maps[NUMBER])
         word_kernels = [p for p in components(maps[WORD] > 0) if len(p) >= MIN_KERNEL_PIXELS]
         number_kernels = [p for p in components(maps[NUMBER] > 0) if len(p) >= MIN_KERNEL_PIXELS]
@@ -327,9 +327,8 @@ class Detection:
             if held == {card + 1}:
                 y, x = np.concatenate([y, area[:, 0]]), np.concatenate([x, area[:, 1]])
                 break
-        h, w = self.labels.shape
-        sides = (((0, -1), y.min() <= 0), ((0, 1), y.max() >= h - 1), ((-1, 0), x.min() <= 0), ((1, 0), x.max() >= w - 1))
-        return [n for n, hit in sides if hit and n in self.frame]
+        extent = {(0, -1): -y.min(), (0, 1): y.max() + 1, (-1, 0): -x.min(), (1, 0): x.max() + 1}
+        return [n for n, at in self.frame.items() if extent[n] >= at - 1]
 
 
     def link_score(self, a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -349,10 +348,11 @@ def detect(photo: Image.Image, region: tuple[int, int, int, int] | None = None) 
         right, bottom, photo pixels) of it.
     """
     x0, y0, x1, y1 = region or (0, 0, photo.width, photo.height)
-    image, s, (ox, oy) = reduce_photo(photo.crop(region) if region else photo)
-    # sides of the region that are sides of the photo
-    frame = tuple(n for n, on in (((0, -1), y0 <= 0), ((0, 1), y1 >= photo.height), ((-1, 0), x0 <= 0),
-                                  ((1, 0), x1 >= photo.width)) if on)
+    image, s, (ox, oy), (w, h) = reduce_photo(photo.crop(region) if region else photo)
+    # sides of the region that are sides of the photo, where the photo ends in the output maps (padding left out)
+    sides = {(0, -1): (y0 <= 0, -oy / 2), (0, 1): (y1 >= photo.height, (oy + h) / 2),
+             (-1, 0): (x0 <= 0, -ox / 2), (1, 0): (x1 >= photo.width, (ox + w) / 2)}
+    frame = {n: at for n, (on, at) in sides.items() if on}
     return Detection(network_maps(image),
                      lambda points: [((2 * u - ox) / s + x0, (2 * v - oy) / s + y0) for u, v in points], frame)
 

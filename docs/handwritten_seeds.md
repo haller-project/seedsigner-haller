@@ -634,13 +634,17 @@ described in [How it works](#how-it-works):
 | `haller-1-detector.npz` | word detector, when the rules find no valid seed | `bcda59a220e52979139f44a634a0946dd9d4fe72cd4b246ee23edc6437964aa4` |
 | `haller-1-fingerprint.npz` | reads the fingerprint line that is checked; same architecture as the word networks | `b92cca552dc0a718d309a98b3e5f7ed6f20ee0be32f92aec8df1804d809de454` |
 
-The fingerprint network was trained from the capitals one (Haller commit
-`189c625`, `train --init`) for one epoch on 8 synthetic shards of 50 000
-lines, half of them fingerprints (`generate --hex-share 0.5`: 8 hexadecimal
-digits, sometimes in two groups, after an optional « fp », « xfp »,
-« fingerprint »…, in capitals or lowercase; two shards in cursive fonts), and
-the filtered GNHK words; epoch chosen on 4 000 separate fingerprint lines
-(two more epochs read the words worse and the fingerprints no better). On
+The fingerprint network was fine-tuned from the float capitals network
+(`train --init`) in two steps, each the first epoch of a longer learning-rate
+schedule (4 epochs at 5e-4, then 3 epochs at 3e-4), on 8 synthetic shards of
+50 000 lines, half of them fingerprints (`generate --hex-share 0.5`: 8
+hexadecimal digits, sometimes in two groups, after an optional « fp »,
+« xfp », « fingerprint »…, in capitals or lowercase; two shards in cursive
+fonts), and the filtered GNHK words. The first epoch of the second step was
+kept, chosen on 4 000 separate fingerprint lines (two more epochs read the
+words worse and the fingerprints no better). The data, both float models, the
+commands and the content digests are in `recipes/haller-1-fingerprint` of the
+Haller repository; its quantization gives this file byte for byte. On
 those lines, the probability of the right fingerprint reaches the match
 threshold of 1e-4 for 80 % of them (43 % with the two word networks), 69 %
 in cursive fonts (29 %); the 8 digits are read exactly in 35 % of them (9 %).

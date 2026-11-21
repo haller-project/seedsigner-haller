@@ -272,7 +272,7 @@ network (`haller-1-fingerprint.npz`, see [The Haller-1 model](#the-haller-1-mode
 `fingerprint.FingerprintCheck`: probability of each digit at each position
 by a forward-backward pass over the constrained CTC)
 and compared with the fingerprints of the candidate seeds of the reading:
-the 16 most probable valid seeds (`FINGERPRINT_CANDIDATES`) of every reading
+the 3 most probable valid seeds (`FINGERPRINT_CANDIDATES`) of every reading
 of the photo (both orders of two columns, both networks and their blend), in
 order of rank. The fingerprint
 of a seed is computed as SeedSigner does (embit: PBKDF2-HMAC-SHA512 with 2048
@@ -280,11 +280,25 @@ rounds on the words alone, master key, HASH160 of the master public key, first 4
 bytes).
 
 - A candidate matches if the probability of its fingerprint given the line,
-  among all strings of 8 hexadecimal digits, is at least 1e-4
+  among all strings of 8 hexadecimal digits, is at least 7e-4
   (`fingerprint.MIN_MATCH_PROBABILITY`). These probabilities sum to 1, so at
-  most 10 000 strings reach it: the fingerprint of a wrong seed, uniform over
-  2^32 values, matches by chance with a probability of at most 2.3e-6 per
-  seed checked, whatever the calibration of the networks.
+  most 1 428 strings reach it: the fingerprint of a wrong seed, uniform over
+  2^32 values, matches by chance with a probability of at most 3.3e-7 per
+  seed checked, whatever the calibration of the networks, and a photo, whose
+  one fingerprint line is checked against 3 seeds at most, gets a wrong
+  verified seed with a probability of at most 1e-6. The threshold is the
+  lowest one with that bound for the number of candidates that verified the
+  most right seeds on the tuning pages (1 to 16 candidates measured): 3. The
+  right seed was among the first 3 candidates on all but 6 of 1 698 pages
+  with a fingerprint read.
+- A digit missed or one too many in the reading (a first digit taken for a
+  line number, two strokes read as two digits) is taken into account: the
+  line is also read as 7 and as 9 digits, and the probability of a
+  fingerprint is a mixture of the three readings, weighted by their
+  likelihood (prior 0.05 for each shift; `fingerprint.SHIFTS`). Each reading
+  gives a distribution over the same strings of 8 digits, so the bound above
+  holds; a digit missed gives a probability of 1/128 at most (8 positions, 16
+  values).
 - The first candidate that matches is the seed written: it is returned with
   every word certain (`reading.verified`), even when the reading hesitated
   (order of the columns, twin words, truncated words, a list taken for a
@@ -584,10 +598,46 @@ wrong seed is reported as valid. A right seed whose fingerprint is misread
 loses its certain words: 17 seeds with the fingerprint network, 144 when the
 line was read by the two word networks (fourth column). The matching seed
 was the chosen one in 91 % of the cases; 16 candidates find all but 3 of the
-matches found among 64 (ranks 34 and 39 on the tuning photos). On the 1 605 photos of the measurement above, the 920 of the red
+matches found among 64 (ranks 34 and 39 on the tuning photos). These figures
+are those of the first threshold (1e-4, 16 candidates); see below for the
+present one. On the 1 605 photos of the measurement above, the 920 of the red
 team, the 1 167 badly framed ones and the real photos, which carry no
 fingerprint, nothing changes: no line is left out (the thresholds keep a
 margin) and the readings are the same, photo for photo.
+
+### Photos of the Pi Zero camera that failed (21/11/2026)
+
+Photos taken with the Pi Zero camera, of lists with a fingerprint written
+above them, failed for reasons that no simulated bench had shown. Each one
+is now handled by a general rule, measured alone on every bench:
+
+- phantom words on the dark table below the sheet, and an object at the edge
+  of the frame read as a word twice as tall as the others: when the count of
+  lines is wrong, word boxes whose background is darker than 0.4 times the
+  median background of the words, or at least twice the median height, are
+  left out (`detector.InkStats.off_sheet`, `MAX_HEIGHT_SHARE`);
+- specks and writing seen through the sheet: word kernels of less than 0.15
+  times the median size are left out when the count is wrong (`SPECK`);
+- a line crossed out and written again: a reading neither verified nor valid
+  is tried again without the boxes whose share of dark pixels is at least
+  1.8 times the median, and the better one is kept (`CROSSED_OUT`); applied
+  directly, the rule would remove short or bold words;
+- the first digit of a fingerprint taken for a line number and cut out of the
+  line: a number box centered before the start of a line tried as the
+  fingerprint is taken in with it (`detector.with_number`), and a reading
+  one digit short or long is accepted (see above);
+- a fingerprint line close to the threshold of the two word networks is
+  judged by the fingerprint network, with the same thresholds
+  (`FINGERPRINT_RESCUE_MARGIN`).
+
+Against the previous engine, with the threshold of 7e-4 and 3 candidates:
+no wrong verified seed on any bench; real photos (development half) 27 to
+44 seeds right, 2 to 20 verified; real photos (test half) 24 to 25 right;
+seeds right up on every simulated bench, with no loss above 1 % for any
+writing or layout; verified seeds on the test pages with a fingerprint 980
+to 1 048. One trust level falls short of its rate: « Medium » on the red team
+pages with a fingerprint, 16 of 64 right (25 %, 33 % before): its right
+pages became verified, the trap pages stayed.
 
 ## Timings
 
@@ -633,8 +683,9 @@ the line left out is read again by the fingerprint network, loaded the first
 time (1 to 2 s), with the probability of each digit (0.3 to 0.5 s), the
 fingerprint of the chosen seed is computed (0.071 s:
 PBKDF2 0.062 s, master key 0.005 s, libsecp256k1 of embit) and, when it does
-not match, those of the other candidates (16 at most: 1.1 s, and 0.6 to
-1.1 s to compare them with the line). About 2 to 5 s in all; a
+not match, those of the other candidates (2 at most since 21/11/2026, 16
+before: 1.1 s, and 0.6 to 1.1 s to compare them with the line). About 2 to
+5 s in all, plus the readings of the line as 7 and 9 digits (2 passes); a
 photo without a fingerprint line takes the same time as before.
 
 ## The Haller-1 model
@@ -662,7 +713,7 @@ words worse and the fingerprints no better). The data, both float models, the
 commands and the content digests are in `recipes/haller-1-fingerprint` of the
 Haller repository; its quantization gives this file byte for byte. On
 those lines, the probability of the right fingerprint reaches the match
-threshold of 1e-4 for 80 % of them (43 % with the two word networks), 69 %
+threshold of 1e-4 then in use for 80 % of them (43 % with the two word networks), 69 %
 in cursive fonts (29 %); the 8 digits are read exactly in 35 % of them (9 %).
 Its reference vectors were written without the comparison with the float
 model, which disagreed on the best word of one strip close to a tie.

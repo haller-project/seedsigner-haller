@@ -639,6 +639,14 @@ to 1 048. One trust level falls short of its rate: « Medium » on the red team
 pages with a fingerprint, 16 of 64 right (25 %, 33 % before): its right
 pages became verified, the trap pages stayed.
 
+Three more rules come from photos sent by participants: numbered lines written
+in two bands (1-3 beside 4-6, then 7-9 beside 10-12) are read band by band when
+the numbers tell it; words written in rows without columns are read row by
+row; a word box running over the start of the next column is cut there. They
+change no page of the simulated benches; on the real photos, one more seed is
+right in the test half and four more among the participants' photos, with no
+wrong verified seed.
+
 ## Timings
 
 Measured on a Raspberry Pi Zero with the C library, the application stopped,

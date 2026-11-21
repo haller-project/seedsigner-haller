@@ -8,7 +8,7 @@ from PIL import Image
 # Must import test base before the Controller
 from base import BaseTest, FlowTest, FlowStep, FlowTestInvalidButtonDataSelectionException
 
-from seedsigner.helpers.handwriting import WordsNotFound
+from seedsigner.helpers.handwriting import TRUST_HIGH, TRUST_LOW, TRUST_MEDIUM, TRUST_VERIFIED, Trust, WordsNotFound
 from seedsigner.gui.screens.screen import RET_CODE__BACK_BUTTON
 from seedsigner.hardware.camera import Camera
 from seedsigner.models.settings_definition import SettingsConstants
@@ -46,12 +46,18 @@ class StubReading:
         self.uncertain = uncertain or {}
         self.is_valid = is_valid
         self.ambiguous_order = False
+        self.verified = False
+        self.fingerprint = None
         self.analyze_calls = []
 
 
     def analyze(self, confirmed: dict[int, str] = None):
         confirmed = confirmed or {}
         self.analyze_calls.append(dict(confirmed))
+        return self._analysis(confirmed)
+
+
+    def _analysis(self, confirmed: dict[int, str]):
         mnemonic = [confirmed.get(k, word) for k, word in enumerate(self.mnemonic)]
         uncertain = {k: words for k, words in self.uncertain.items() if k not in confirmed}
         if not self.is_valid:
@@ -61,6 +67,14 @@ class StubReading:
         else:
             status = "valid"
         return StubAnalysis(mnemonic, status, uncertain)
+
+
+    def trust(self, confirmed: dict[int, str] = None):
+        confirmed = confirmed or {}
+        if self.verified and all(self.mnemonic[k] == word for k, word in confirmed.items()):
+            return Trust(TRUST_VERIFIED)
+        status = self._analysis(confirmed).status
+        return Trust({"valid": TRUST_HIGH, "uncertain": TRUST_MEDIUM, "invalid": TRUST_LOW}[status])
 
 
 
@@ -109,18 +123,118 @@ class TestHandwritingFlows(FlowTest):
 
     def test_valid_reading_flow(self):
         """
-        A reading with a valid checksum goes through the status and review screens and
-        loads the seed through SeedFinalizeView.
+        A reading with a valid checksum and no fingerprint is not called valid: the
+        status notice shows its trust level, then the review, the fingerprint to write
+        next to the words, and SeedFinalizeView.
         """
         reading = StubReading(VALID_MNEMONIC)
+        screens = []
+
+        def record_screen(view: handwritten_views.HandwrittenStatusView):
+            run_screen = view.run_screen
+            view.run_screen = lambda *args, **kwargs: screens.append((args, kwargs)) or run_screen(*args, **kwargs)
+
         self.run_sequence(self.scan_steps(reading) + [
-            FlowStep(handwritten_views.HandwrittenStatusView, button_data_selection=handwritten_views.HandwrittenStatusView.REVIEW),
+            FlowStep(handwritten_views.HandwrittenStatusView, before_run=record_screen, button_data_selection=handwritten_views.HandwrittenStatusView.UNDERSTAND),
             FlowStep(handwritten_views.HandwrittenReviewView, button_data_selection=handwritten_views.HandwrittenReviewView.DONE),
+            FlowStep(handwritten_views.HandwrittenFingerprintView, button_data_selection=handwritten_views.HandwrittenFingerprintView.NEXT),
             FlowStep(seed_views.SeedFinalizeView, button_data_selection=seed_views.SeedFinalizeView.FINALIZE),
             FlowStep(seed_views.SeedOptionsView),
         ])
 
         assert self.controller.storage.seeds[0].mnemonic_list == VALID_MNEMONIC
+        kwargs = screens[0][1]
+        assert kwargs["status_headline"] == "Not verified"
+        assert kwargs["gauge"] == (TRUST_HIGH, "Confidence: high")
+        assert all("valid" not in text.lower().replace("invalid", "") for _, text in kwargs["paragraphs"])
+
+
+    def test_verified_reading_flow(self):
+        """
+        A seed verified by its fingerprint is announced as verified and loaded without
+        asking to write its fingerprint.
+        """
+        reading = StubReading(VALID_MNEMONIC)
+        reading.verified = True
+        reading.fingerprint = MagicMock(status="verified", matched="73c5da0a")
+        self.run_sequence(self.scan_steps(reading) + [
+            FlowStep(handwritten_views.HandwrittenStatusView, button_data_selection=handwritten_views.HandwrittenStatusView.REVIEW),
+            FlowStep(handwritten_views.HandwrittenReviewView, button_data_selection=handwritten_views.HandwrittenReviewView.DONE),
+            FlowStep(seed_views.SeedFinalizeView),
+        ])
+
+
+    def test_verified_reading_word_changed(self):
+        """
+        A word of a verified seed changed by the user takes the verification away: the
+        fingerprint of the seed loaded is then shown to be written.
+        """
+        reading = StubReading(VALID_MNEMONIC)
+        reading.verified = True
+        reading.fingerprint = MagicMock(status="verified", matched="73c5da0a")
+        self.run_sequence(self.scan_steps(reading) + [
+            FlowStep(handwritten_views.HandwrittenStatusView, button_data_selection=handwritten_views.HandwrittenStatusView.REVIEW),
+            FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=11),
+            FlowStep(handwritten_views.HandwrittenWordView, button_data_selection=handwritten_views.HandwrittenWordView.TYPE_WORD),
+            FlowStep(handwritten_views.HandwrittenWordEntryView, screen_return_value="actual"),
+            FlowStep(handwritten_views.HandwrittenReviewView, button_data_selection=handwritten_views.HandwrittenReviewView.DONE),
+            FlowStep(handwritten_views.HandwrittenFingerprintView, button_data_selection=handwritten_views.HandwrittenFingerprintView.NEXT),
+            FlowStep(seed_views.SeedFinalizeView),
+        ])
+
+        assert self.controller.storage.get_pending_seed().mnemonic_list == VALID_MNEMONIC[:11] + ["actual"]
+
+
+    def test_fingerprint_mismatch_flow(self):
+        """
+        A fingerprint that matches none of the seeds read: the notice and the fingerprint
+        screen both give the passphrase as a possible cause.
+        """
+        reading = StubReading(VALID_MNEMONIC, uncertain={k: ["ability"] for k in range(12)})
+        reading.fingerprint = MagicMock(status="mismatch", text="0badf00d")
+        screens = []
+
+        def record_screen(view: View):
+            run_screen = view.run_screen
+            view.run_screen = lambda *args, **kwargs: screens.append(kwargs) or run_screen(*args, **kwargs)
+
+        self.run_sequence(self.scan_steps(reading) + [
+            FlowStep(handwritten_views.HandwrittenStatusView, before_run=record_screen, button_data_selection=handwritten_views.HandwrittenStatusView.UNDERSTAND),
+            FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=0),
+            FlowStep(handwritten_views.HandwrittenWordView, screen_return_value=0),
+            FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=1),
+            FlowStep(handwritten_views.HandwrittenWordView, screen_return_value=0),
+            FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=2),
+            FlowStep(handwritten_views.HandwrittenWordView, screen_return_value=0),
+            FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=3),
+            FlowStep(handwritten_views.HandwrittenWordView, screen_return_value=0),
+            FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=4),
+            FlowStep(handwritten_views.HandwrittenWordView, screen_return_value=0),
+            FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=5),
+            FlowStep(handwritten_views.HandwrittenWordView, screen_return_value=0),
+            FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=6),
+            FlowStep(handwritten_views.HandwrittenWordView, screen_return_value=0),
+            FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=7),
+            FlowStep(handwritten_views.HandwrittenWordView, screen_return_value=0),
+            FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=8),
+            FlowStep(handwritten_views.HandwrittenWordView, screen_return_value=0),
+            FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=9),
+            FlowStep(handwritten_views.HandwrittenWordView, screen_return_value=0),
+            FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=10),
+            FlowStep(handwritten_views.HandwrittenWordView, screen_return_value=0),
+            FlowStep(handwritten_views.HandwrittenReviewView, screen_return_value=11),
+            FlowStep(handwritten_views.HandwrittenWordView, screen_return_value=0),
+            FlowStep(handwritten_views.HandwrittenReviewView, button_data_selection=handwritten_views.HandwrittenReviewView.DONE),
+            FlowStep(handwritten_views.HandwrittenFingerprintView, before_run=record_screen, button_data_selection=handwritten_views.HandwrittenFingerprintView.NEXT),
+            FlowStep(seed_views.SeedFinalizeView),
+        ])
+
+        assert "passphrase" in screens[0]["paragraphs"][0][1] and "0badf00d" in screens[0]["paragraphs"][0][1]
+        assert screens[0]["gauge"][0] == TRUST_MEDIUM
+        fingerprint = self.controller.storage.get_pending_seed().get_fingerprint()
+        assert screens[1]["status_headline"] == fingerprint
+        assert "without passphrase" in screens[1]["text"] and "0badf00d" in screens[1]["text"]
+        assert "passphrase" in screens[1]["text"]
 
 
     def test_seed_select_flow_entry(self):
@@ -151,6 +265,7 @@ class TestHandwritingFlows(FlowTest):
             FlowStep(handwritten_views.HandwrittenReviewView, before_run=check_review, screen_return_value=2),
             FlowStep(handwritten_views.HandwrittenWordView, screen_return_value=0),  # back to "abandon"
             FlowStep(handwritten_views.HandwrittenReviewView, button_data_selection=handwritten_views.HandwrittenReviewView.DONE),
+            FlowStep(handwritten_views.HandwrittenFingerprintView, button_data_selection=handwritten_views.HandwrittenFingerprintView.NEXT),
             FlowStep(seed_views.SeedFinalizeView),
         ])
 
@@ -211,6 +326,7 @@ class TestHandwritingFlows(FlowTest):
             FlowStep(handwritten_views.HandwrittenWordView, button_data_selection=handwritten_views.HandwrittenWordView.TYPE_WORD),
             FlowStep(handwritten_views.HandwrittenWordEntryView, screen_return_value="about"),
             FlowStep(handwritten_views.HandwrittenReviewView, before_run=check_review, button_data_selection=handwritten_views.HandwrittenReviewView.DONE),
+            FlowStep(handwritten_views.HandwrittenFingerprintView, button_data_selection=handwritten_views.HandwrittenFingerprintView.NEXT),
             FlowStep(seed_views.SeedFinalizeView),
         ])
 

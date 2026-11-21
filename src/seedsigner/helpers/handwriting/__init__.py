@@ -5,6 +5,7 @@
 
         reading = read_seed(image, progress, on_word)
         analysis = reading.analyze(confirmed)
+        trust = reading.trust(confirmed)
 
     Each word is cut out of the photo (page.py), normalized (preprocess.py),
     read by a small neural network (word_model.py) and scored against the 2 048
@@ -17,6 +18,12 @@
     if no list was found, as a list of two columns written too close together
     (page.find_aligned_words). The result must always be reviewed by the user
     against the paper.
+
+    A seed is only verified when the master key fingerprint written with the
+    words is read and matches them (see check_fingerprint). Otherwise, however
+    sure each word is, the reading is never called valid, sure or verified:
+    its trust level (see Trust) only says how often such readings are fully
+    right.
 """
 import math
 import threading
@@ -134,6 +141,23 @@ WORD_COST = 0.2
 OTHER_WORD_COST = 0.06
 REREAD_COST = 0.4
 
+# Trust levels of a reading (see Trust). TRUST_VERIFIED is reserved for a seed
+# verified by its fingerprint. A fingerprint read that matches none of the
+# seeds read is evidence against them: TRUST_LOW. Without one: TRUST_HIGH when the checksum
+# analysis leaves no word uncertain, TRUST_MEDIUM when the seed is valid with
+# a probability of at least MIN_MEDIUM_SEED_PROBABILITY, TRUST_LOW otherwise.
+# TRUST_RATES: lowest share of fully right seeds each level stands for. Chosen
+# on the simulated tuning pages only (DEV2, SERRE_DEV and lists with a
+# fingerprint, 2 757 pages, none from the test benches): the Wilson lower
+# bound (95 %) of the measured share is above the rate announced, 94.7 % for
+# TRUST_HIGH (667 of 694 seeds right) and 50.7 % for TRUST_MEDIUM (159 of 283).
+TRUST_LOW = 1
+TRUST_MEDIUM = 2
+TRUST_HIGH = 3
+TRUST_VERIFIED = 4
+MIN_MEDIUM_SEED_PROBABILITY = 0.5
+TRUST_RATES = {TRUST_LOW: 0.0, TRUST_MEDIUM: 0.4, TRUST_HIGH: 0.9, TRUST_VERIFIED: 1.0}
+
 _engine = []
 _engine_lock = threading.Lock()
 _fingerprint_network = []
@@ -175,6 +199,26 @@ class WordReading:
     def __init__(self, image: Image.Image, candidates: list[tuple[str, float]]):
         self.image = image
         self.candidates = candidates
+
+
+
+class Trust:
+    """
+        Trust in a reading.
+
+        verified: the fingerprint written with the words matches the seed
+        level: TRUST_LOW, TRUST_MEDIUM, TRUST_HIGH or TRUST_VERIFIED
+        rate: lowest share of fully right seeds announced for the level (see
+            TRUST_RATES)
+    """
+    def __init__(self, level: int):
+        self.level = level
+        self.verified = level == TRUST_VERIFIED
+        self.rate = TRUST_RATES[level]
+
+
+    def __repr__(self):
+        return f"Trust({self.level})"
 
 
 
@@ -251,6 +295,25 @@ class SeedReading:
                 or any(a is not b for a, b in zip(self._last[1], readings)):
             self._last = (confirmed, readings, Analysis(readings, self.min_seed_probability, self.doubtful))
         return self._last[2]
+
+
+    def trust(self, confirmed: dict[int, str] = None) -> Trust:
+        """
+            Trust in the seed of analyze(confirmed): TRUST_VERIFIED only if its
+            fingerprint was read and matched (words confirmed by the user that
+            differ from the verified seed take that away), else the level of
+            its checksum analysis (see TRUST_RATES).
+        """
+        analysis = self.analyze(confirmed)
+        if self.verified and all(self.words[k].candidates[0][0] == w for k, w in (confirmed or {}).items()):
+            return Trust(TRUST_VERIFIED)
+        if self.fingerprint is not None and self.fingerprint.status == "mismatch":
+            return Trust(TRUST_LOW)
+        if analysis.status == "valid":
+            return Trust(TRUST_HIGH)
+        if analysis.status == "uncertain" and analysis.confidence >= MIN_MEDIUM_SEED_PROBABILITY:
+            return Trust(TRUST_MEDIUM)
+        return Trust(TRUST_LOW)
 
 
 

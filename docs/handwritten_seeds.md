@@ -33,10 +33,16 @@ used.
    see [Timings](#timings)). The progress bar moves at a steady pace from the
    click; the screen shows the photo while the words are searched, then the
    area of the words with the word being read outlined, and that word.
-3. Status: a valid checksum is announced in a few words. Otherwise a full
-   screen notice says what happened (words to check, or invalid checksum),
-   that every word must be compared with the paper, what the marks on the
-   uncertain words mean, and that unmarked words can be wrong too. The text
+3. Status: a seed is announced as **verified** only when the fingerprint
+   written with the words is read and matches them (see
+   [Trust in a reading](#trust-in-a-reading)). Any other reading is never
+   called valid, sure or verified, however sure each word is: a full screen
+   notice, headed « Not verified », shows the trust gauge (four segments, the
+   last one reserved for « verified »), says what happened (no fingerprint,
+   a fingerprint that does not match, two possible orders, or an invalid
+   checksum), that every word must be compared with the paper, what the
+   marks on the uncertain words mean, and that unmarked words can be wrong
+   too. The text
    is paged with the up and down keys; its "I understand" button can only be
    selected from the last page, so that a click made by mistake does not skip
    it.
@@ -45,7 +51,12 @@ used.
    shows its handwritten image, up to three candidate words with their
    probability, and the usual keyboard to type it. A confirmed word is fixed and
    the checksum analysis is run again.
-5. "Done" passes the seed to the standard flow (fingerprint, passphrase).
+5. When the seed was not verified (no fingerprint, a fingerprint that does
+   not match, or a word of a verified seed changed by the user), a screen
+   asks to write its fingerprint next to the words, without passphrase, so
+   that the next reading can be verified; when a fingerprint was read and did
+   not match, it is quoted and a passphrase given as a possible cause.
+6. The seed then goes to the standard flow (fingerprint, passphrase).
 
 Nothing is written to disk: the photo and the readings only live in memory and
 are dropped with the views.
@@ -67,12 +78,15 @@ then read a photo (upright, full resolution) with the engine:
 from PIL import Image
 from seedsigner.helpers.handwriting import read_seed
 
-analysis = read_seed(Image.open("photo.jpg")).analyze()
-print(analysis.status, " ".join(analysis.mnemonic), analysis.uncertain)
+reading = read_seed(Image.open("photo.jpg"))
+analysis, trust = reading.analyze(), reading.trust()
+print(trust.level, trust.verified, " ".join(analysis.mnemonic), analysis.uncertain)
 ```
 
-`status` is `valid`, `uncertain` (valid checksum, words to check, listed in
-`uncertain`) or `invalid`; `read_seed` raises `WordsNotFound` when no card or
+`trust.level` is 4 (verified by the fingerprint), 3, 2 or 1 (see
+[Trust in a reading](#trust-in-a-reading)). `analysis.status`, internal to the
+search, is `valid` (no uncertain word), `uncertain` (valid checksum, words to
+check, listed in `uncertain`) or `invalid`; `read_seed` raises `WordsNotFound` when no card or
 list of 12 to 24 words is found. Use test photos only (for example the BIP39
 test vectors written by hand), never a real seed.
 
@@ -286,12 +300,42 @@ bytes).
 - The first candidate that matches is the seed written: it is returned with
   every word certain (`reading.verified`), even when the rules hesitated
   (order of the columns, twin words, truncated words, a list taken for a
-  card). The screen says « Fingerprint matches » and shows the fingerprint
-  computed.
+  card). The screen says « Verified » and shows the fingerprint computed.
 - When none matches, the seed is never called wrong: a word or a digit may
   be misread, or the fingerprint is that of the seed with a passphrase. The
   words read are kept and every one of them is to check; the screen says
-  that the fingerprint read does not match these words.
+  that the fingerprint read does not match these words, and the trust level
+  is low (see below).
+
+### Trust in a reading
+
+Decision of 21/11/2026: a seed is **verified**, the only state in which it is
+announced as right, when and only when the fingerprint written with its
+words is read and matches them. Without a fingerprint, or when it does not
+match, the screens never say « valid », « sure » or « verified », even when
+every word has a probability of 1: the checksum and the networks can agree on
+a wrong seed (a truncated word read as another BIP39 word, for instance).
+`SeedReading.trust(confirmed)` returns a `Trust`:
+
+| Level | When | Announced share of fully right seeds |
+|---|---|---|
+| 4, verified | the fingerprint matches (`reading.verified`); a word confirmed by the user that differs from the verified seed takes it away | all |
+| 3, high | no fingerprint read, and the checksum analysis leaves no word uncertain | at least 90 % |
+| 2, medium | no fingerprint read, the seed is valid with words to check, and its probability is at least 0.5 (`MIN_MEDIUM_SEED_PROBABILITY`) | at least 40 % |
+| 1, low | anything else: improbable or invalid seed, or a fingerprint read that matches none of the seeds read (evidence against them: 10 to 25 % of such seeds are right on the tuning pages) | none |
+
+The announced shares (`TRUST_RATES`) were chosen on simulated tuning pages
+only (DEV2, SERRE_DEV and lists with a fingerprint, 2 757 pages): the 95 %
+Wilson lower bound of the measured share is 94.7 % for level 3 (667 of 694
+seeds right) and 50.7 % for level 2 (159 of 283). On the test benches and the
+real photos the measured share is at or above the announced one, except on
+the red team with a fingerprint line (adversarial pages: 54 of 61 at level 3,
+16 of 48 at level 2). The gauge is computed once the reading is done and does
+not change the reading itself.
+
+After a seed is loaded without being verified, SeedSigner shows its
+fingerprint (always without passphrase) to be written next to the words:
+the next reading of that paper can then be verified.
 
 The fingerprint is not secret; it stays in the reading, as the words do.
 

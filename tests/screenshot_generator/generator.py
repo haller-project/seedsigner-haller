@@ -126,6 +126,9 @@ class HandwrittenReadingStub:
         ImageDraw.Draw(word_image).text((8, 4), mnemonic_12[0], fill=0, font=ImageFont.load_default(size=28))
         self.words = [SimpleNamespace(image=word_image)] * len(mnemonic_12)
         self.ambiguous_order = False
+        self.verified = False
+        self.fingerprint = None
+        self.level = {"valid": 3, "uncertain": 2, "invalid": 1}[status]
         self.analysis = SimpleNamespace(
             mnemonic=mnemonic_12,
             status=status,
@@ -136,6 +139,10 @@ class HandwrittenReadingStub:
     def analyze(self, confirmed: dict[int, str] = None):
         return self.analysis
 
+    def trust(self, confirmed: dict[int, str] = None):
+        from seedsigner.helpers.handwriting import Trust
+        return Trust(4 if self.verified else self.level)
+
 handwritten_review_valid = handwritten_views.HandwrittenReview(HandwrittenReadingStub("valid", {}))
 handwritten_review_uncertain = handwritten_views.HandwrittenReview(HandwrittenReadingStub("uncertain", {0: ["form"], 5: ["sight"]}))
 handwritten_review_uncertain.confirmed[5] = mnemonic_12[5]
@@ -145,6 +152,9 @@ handwritten_review_order.reading.ambiguous_order = True
 _fingerprint_12 = Seed(mnemonic=mnemonic_12, wordlist_language_code=SettingsConstants.WORDLIST_LANGUAGE__ENGLISH).get_fingerprint()
 handwritten_review_fingerprint = handwritten_views.HandwrittenReview(HandwrittenReadingStub("valid", {}))
 handwritten_review_fingerprint.reading.fingerprint = SimpleNamespace(status="verified", matched=_fingerprint_12, text=_fingerprint_12)
+handwritten_review_fingerprint.reading.verified = True
+handwritten_review_low = handwritten_views.HandwrittenReview(HandwrittenReadingStub("uncertain", {k: ["form"] for k in range(12)}))
+handwritten_review_low.reading.level = 1
 handwritten_review_fingerprint_mismatch = handwritten_views.HandwrittenReview(
     HandwrittenReadingStub("uncertain", {k: ["form"] for k in range(12)}))
 handwritten_review_fingerprint_mismatch.reading.fingerprint = SimpleNamespace(status="mismatch", matched=None, text="73c5da0a")
@@ -490,15 +500,18 @@ def generate_screenshots(locale):
                 ScreenshotConfig(handwritten_views.HandwrittenReadFailedView),
                 ScreenshotConfig(handwritten_views.HandwrittenReadFailedView, dict(at_edge=True), screenshot_name="HandwrittenReadFailedView_at_edge"),
                 ScreenshotConfig(handwritten_views.HandwrittenReadFailedView, dict(line_count=11), screenshot_name="HandwrittenReadFailedView_line_count"),
-                ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_valid), screenshot_name="HandwrittenStatusView_valid"),
-                ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_uncertain), screenshot_name="HandwrittenStatusView_uncertain"),
+                ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_valid), screenshot_name="HandwrittenStatusView_high"),
+                ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_uncertain), screenshot_name="HandwrittenStatusView_medium"),
+                ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_low), screenshot_name="HandwrittenStatusView_low"),
                 ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_invalid), screenshot_name="HandwrittenStatusView_invalid"),
                 ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_order), screenshot_name="HandwrittenStatusView_order"),
-                ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_fingerprint), screenshot_name="HandwrittenStatusView_fingerprint"),
+                ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_fingerprint), screenshot_name="HandwrittenStatusView_verified"),
                 ScreenshotConfig(handwritten_views.HandwrittenStatusView, dict(review=handwritten_review_fingerprint_mismatch), screenshot_name="HandwrittenStatusView_fingerprint_mismatch"),
                 ScreenshotConfig(handwritten_views.HandwrittenReviewView, dict(review=handwritten_review_uncertain)),
                 ScreenshotConfig(handwritten_views.HandwrittenWordView, dict(review=handwritten_review_uncertain, word_index=0)),
                 ScreenshotConfig(handwritten_views.HandwrittenWordEntryView, dict(review=handwritten_review_uncertain, word_index=0)),
+                ScreenshotConfig(handwritten_views.HandwrittenFingerprintView, dict(review=handwritten_review_valid)),
+                ScreenshotConfig(handwritten_views.HandwrittenFingerprintView, dict(review=handwritten_review_fingerprint_mismatch), screenshot_name="HandwrittenFingerprintView_mismatch"),
                 ScreenshotConfig(handwritten_views.HandwrittenInvalidView),
             ],
             "PSBT Views": [

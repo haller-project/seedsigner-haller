@@ -3,8 +3,10 @@ Loads a seed from a photo of its handwritten words: a SeedSigner 12-word or 24-w
 seed card, or a free list of words.
 
 Flow: photo (HandwrittenScanView), reading (HandwrittenReadView), result
-(HandwrittenStatusView), review of every word, with each uncertain word confirmed (HandwrittenReviewView,
-HandwrittenWordView, HandwrittenWordEntryView), then the standard SeedFinalizeView.
+(HandwrittenStatusView: verified by the fingerprint written with the words, or else a
+trust level), review of every word, with each uncertain word confirmed (HandwrittenReviewView,
+HandwrittenWordView, HandwrittenWordEntryView), the fingerprint to write next to the words
+when the seed was not verified (HandwrittenFingerprintView), then the standard SeedFinalizeView.
 
 The photo is only kept in memory (as JPEG data), and only until the reading is done.
 """
@@ -20,6 +22,7 @@ from seedsigner.gui.screens.handwritten_screens import (HandwrittenNoticeScreen,
 from seedsigner.gui.screens.screen import ButtonOption, ButtonOptionWithoutTranslation
 from seedsigner.gui.screens.seed_screens import SeedMnemonicEntryScreen
 from seedsigner.hardware.camera import Camera
+from seedsigner.helpers.l10n import mark_for_translation as _mft
 from seedsigner.models.seed import InvalidSeedException, Seed
 from seedsigner.views.view import BackStackView, Destination, MainMenuView, View
 
@@ -160,11 +163,20 @@ class HandwrittenReadFailedView(View):
 
 class HandwrittenStatusView(View):
     """
-    A valid reading is announced in a few words; otherwise a full screen notice explains
-    what to do, and must be scrolled through before going on to the review.
+    A seed whose fingerprint, written with the words, matches them is announced as
+    verified. Any other reading is never called valid: a full screen notice shows its
+    trust level and explains what to do, and must be scrolled through before going on
+    to the review.
     """
     REVIEW = ButtonOption("Review words")
     UNDERSTAND = ButtonOption("I understand")
+
+    # Label of each trust level below "verified" (see handwriting.TRUST_RATES)
+    TRUST_LABELS = {
+        1: _mft("Confidence: low"),
+        2: _mft("Confidence: medium"),
+        3: _mft("Confidence: high"),
+    }
 
     def __init__(self, review: HandwrittenReview):
         super().__init__()
@@ -173,64 +185,59 @@ class HandwrittenStatusView(View):
 
     def run(self):
         analysis = self.review.analyze()
+        trust = self.review.reading.trust()
         # TRANSLATOR_NOTE: Inserts the number of words read (e.g. "12 words read")
         title = _("{} words read").format(len(analysis.mnemonic))
 
         fingerprint = getattr(self.review.reading, "fingerprint", None)
-        if analysis.status == "valid":
-            if fingerprint is not None and fingerprint.status == "verified":
-                status_headline = _("Fingerprint matches")
-                # TRANSLATOR_NOTE: Inserts the fingerprint written with the words (e.g. "73c5da0a")
-                text = _("The fingerprint {} written with your words is that of this seed.").format(fingerprint.matched)
-            else:
-                status_headline = _("Valid checksum")
-                text = _("Compare every word with your paper before using this seed.")
+        if trust.verified:
             self.run_screen(
                 LargeIconStatusScreen,
                 title=title,
-                status_headline=status_headline,
-                text=text,
+                status_headline=_("Verified"),
+                # TRANSLATOR_NOTE: Inserts the fingerprint written with the words (e.g. "73c5da0a")
+                text=_("The fingerprint {} written with your words matches them.").format(fingerprint.matched),
                 show_back_button=False,
                 button_data=[self.REVIEW],
             )
+            return Destination(HandwrittenReviewView, view_args={"review": self.review}, skip_current_view=True)
 
+        if analysis.status == "invalid":
+            status_color = GUIConstants.DIRE_WARNING_COLOR
+            what = _("Some words were misread: this is not a valid seed.")
         else:
-            if analysis.status == "uncertain":
-                # TRANSLATOR_NOTE: Inserts the number of uncertain words (e.g. "Words to check: 2")
-                status_headline = _("Words to check: {}").format(len(analysis.uncertain))
-                status_color = GUIConstants.WARNING_COLOR
-                if fingerprint is not None and fingerprint.status == "mismatch":
-                    # TRANSLATOR_NOTE: Inserts the fingerprint as read (e.g. "73c5da0a")
-                    what = _("The fingerprint read, {}, does not match these words: a word or a digit may be "
-                             "misread, or it belongs to a passphrase. Compare every word with your paper."
-                             ).format(fingerprint.text)
-                elif self.review.reading.ambiguous_order:
-                    what = _("Your words are in two columns that can be read in two orders. "
-                             "Check the order of every word against your paper.")
-                else:
-                    what = _("Some words could not be read with certainty. Compare every word with your paper.")
+            status_color = GUIConstants.WARNING_COLOR
+            if fingerprint is not None and fingerprint.status == "mismatch":
+                # TRANSLATOR_NOTE: Inserts the fingerprint as read (e.g. "73c5da0a")
+                what = _("The fingerprint read, {}, does not match these words: a word or a digit may be "
+                         "misread, or it is that of a passphrase.").format(fingerprint.text)
+            elif self.review.reading.ambiguous_order:
+                what = _("Your words are in two columns that can be read in two orders. "
+                         "Check the order of every word.")
             else:
-                status_headline = _("Invalid checksum")
-                status_color = GUIConstants.DIRE_WARNING_COLOR
-                what = _("Some words were misread: this is not a valid seed. Compare every word with your paper.")
+                what = _("No fingerprint was found with your words to verify them.")
 
+        paragraphs = [
+            (None, what),
+            (None, _("Compare every word with your paper.")),
+        ]
+        if analysis.uncertain:
             if len(analysis.uncertain) == len(analysis.mnemonic):
                 marks = _("Every word is marked like this: open each one, then confirm or correct it.")
             else:
                 marks = _("The least sure words are marked like this: open each one, then confirm or correct it.")
+            paragraphs.append((SeedSignerIconConstants.WARNING, marks))
+        paragraphs.append((None, _("Unmarked words can be wrong too. Never use this seed without checking it.")))
 
-            self.run_screen(
-                HandwrittenNoticeScreen,
-                title=title,
-                status_headline=status_headline,
-                status_color=status_color,
-                paragraphs=[
-                    (None, what),
-                    (SeedSignerIconConstants.WARNING, marks),
-                    (None, _("Unmarked words can be wrong too. Never use this seed without checking it.")),
-                ],
-                button_data=[self.UNDERSTAND],
-            )
+        self.run_screen(
+            HandwrittenNoticeScreen,
+            title=title,
+            status_headline=_("Not verified"),
+            status_color=status_color,
+            gauge=(trust.level, _(self.TRUST_LABELS[trust.level])),
+            paragraphs=paragraphs,
+            button_data=[self.UNDERSTAND],
+        )
 
         return Destination(HandwrittenReviewView, view_args={"review": self.review}, skip_current_view=True)
 
@@ -284,6 +291,8 @@ class HandwrittenReviewView(View):
                 return Destination(HandwrittenInvalidView)
 
             self.controller.storage.set_pending_seed(seed)
+            if not self.review.reading.trust(self.review.confirmed).verified:
+                return Destination(HandwrittenFingerprintView, view_args={"review": self.review})
             from seedsigner.views.seed_views import SeedFinalizeView
             return Destination(SeedFinalizeView)
 
@@ -363,6 +372,50 @@ class HandwrittenWordEntryView(View):
 
         self.review.confirmed[self.word_index] = word
         return Destination(BackStackView)
+
+
+
+class HandwrittenFingerprintView(View):
+    """
+    Shown when the seed loaded was not verified by a fingerprint written with its words:
+    asks to write its fingerprint, without passphrase, next to the words, so that the
+    next reading can be verified.
+    """
+    NEXT = ButtonOption("Next")
+
+    def __init__(self, review: HandwrittenReview):
+        super().__init__()
+        self.review = review
+
+
+    def run(self):
+        # Fingerprint of the words alone, whatever passphrase is added afterwards
+        pending_seed = self.controller.storage.get_pending_seed()
+        seed_fingerprint = Seed(pending_seed.mnemonic_list, wordlist_language_code=pending_seed.wordlist_language_code).get_fingerprint()
+        fingerprint = getattr(self.review.reading, "fingerprint", None)
+        if fingerprint is not None and fingerprint.status == "mismatch":
+            # TRANSLATOR_NOTE: Inserts the fingerprint as read on the paper (e.g. "73c5da0a")
+            text = _("Yours, {}, did not match: it may include a passphrase. Write this one, without "
+                     "passphrase.").format(fingerprint.text)
+        else:
+            text = _("Write this fingerprint next to your words, without passphrase: next time, it will verify them.")
+
+        selected_menu_num = self.run_screen(
+            LargeIconStatusScreen,
+            title=_("Fingerprint"),
+            status_icon_name=SeedSignerIconConstants.FINGERPRINT,
+            status_color=GUIConstants.ACCENT_COLOR,
+            status_headline=seed_fingerprint,
+            text=text,
+            show_back_button=True,
+            button_data=[self.NEXT],
+        )
+
+        if selected_menu_num == RET_CODE__BACK_BUTTON:
+            return Destination(BackStackView)
+
+        from seedsigner.views.seed_views import SeedFinalizeView
+        return Destination(SeedFinalizeView)
 
 
 

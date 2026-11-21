@@ -289,8 +289,10 @@ class HandwrittenWordScreen(ButtonListScreen):
 @dataclass
 class HandwrittenNoticeScreen(BaseTopNavScreen):
     """
-    Full screen notice to read before going on: a colored headline, then `paragraphs`,
-    (icon name or None, text) pairs, the icon being drawn before its paragraph. KEY_DOWN
+    Full screen notice to read before going on: a colored headline, then `gauge`, a
+    (level, label) pair drawn as GAUGE_LEVELS segments of which `level` are filled, with
+    its label below, then `paragraphs`, (icon name or None, text) pairs, the icon being
+    drawn before its paragraph. KEY_DOWN
     and KEY_UP turn the pages of the text. The button below it can only be selected
     from the last page, so that a click made by mistake does not skip the notice.
 
@@ -299,11 +301,18 @@ class HandwrittenNoticeScreen(BaseTopNavScreen):
     show_back_button: bool = False
     status_headline: str = None
     status_color: str = GUIConstants.WARNING_COLOR
+    gauge: tuple = None
     paragraphs: list = None
     icon_color: str = GUIConstants.WARNING_COLOR
     button_data: list = field(default_factory=lambda: [ButtonOption("I understand")])
 
     ARROW_HALF_WIDTH = 10
+
+    # The gauge: its last segment stands for a seed verified by its fingerprint
+    GAUGE_LEVELS = 4
+    GAUGE_SEGMENT_WIDTH = 34
+    GAUGE_SEGMENT_HEIGHT = 10
+    GAUGE_SEGMENT_GAP = 4
 
 
     def __post_init__(self):
@@ -361,8 +370,9 @@ class HandwrittenNoticeScreen(BaseTopNavScreen):
                     lines.append(word)
             return lines
 
-        # (x, y, text, font, color, anchor) of everything to draw
+        # (x, y, text, font, color, anchor) of everything to draw, and the gauge segments (box, filled)
         items = []
+        segments = []
         lines = []
         y = int(GUIConstants.COMPONENT_PADDING / 2)
         paragraphs = ([(None, self.status_headline)] if self.status_headline else []) + list(self.paragraphs or [])
@@ -382,11 +392,29 @@ class HandwrittenNoticeScreen(BaseTopNavScreen):
                 lines.append((y, y + line_height, max(k, 1) if self.status_headline else k))
                 y += line_height
             y += GUIConstants.COMPONENT_PADDING
+            if is_headline and self.gauge:
+                level, label = self.gauge
+                width = self.GAUGE_LEVELS * self.GAUGE_SEGMENT_WIDTH + (self.GAUGE_LEVELS - 1) * self.GAUGE_SEGMENT_GAP
+                x0 = int((self.canvas_width - width) / 2)
+                for i in range(self.GAUGE_LEVELS):
+                    x1 = x0 + i * (self.GAUGE_SEGMENT_WIDTH + self.GAUGE_SEGMENT_GAP)
+                    segments.append(((x1, y, x1 + self.GAUGE_SEGMENT_WIDTH - 1, y + self.GAUGE_SEGMENT_HEIGHT - 1), i < level))
+                top = y
+                y += self.GAUGE_SEGMENT_HEIGHT + int(GUIConstants.COMPONENT_PADDING / 2)
+                items.append((int(self.canvas_width / 2), y, label, body_font, GUIConstants.BODY_FONT_COLOR, "ma"))
+                y += line_height
+                lines.append((top, y, 1))
+                y += GUIConstants.COMPONENT_PADDING
 
         image = Image.new("RGB", (self.canvas_width, y), GUIConstants.BACKGROUND_COLOR)
         draw = ImageDraw.Draw(image)
         for x, y, text, font, color, anchor in items:
             draw.text((x, y), text, font=font, fill=color, anchor=anchor)
+        for box, filled in segments:
+            if filled:
+                draw.rectangle(box, fill=self.status_color)
+            else:
+                draw.rectangle(box, outline=GUIConstants.BUTTON_BACKGROUND_COLOR, width=2)
         return image, lines
 
 

@@ -418,3 +418,41 @@ def test_aligned_columns_not_found_in_one_column():
     from seedsigner.helpers.handwriting import page
     half = rendered_list(["attitude", "surface", "betray", "supply", "valve", "erupt"]).reduce(2)
     assert page.aligned_columns(half, page.ink_mask(half)) is None
+
+
+
+def test_trust_levels():
+    """
+    A reading is verified only by a matching fingerprint; otherwise its trust level
+    follows its checksum analysis, and a fingerprint that matches no seed read lowers it.
+    """
+    from types import SimpleNamespace
+    from seedsigner.helpers.handwriting import (TRUST_HIGH, TRUST_LOW, TRUST_MEDIUM, TRUST_VERIFIED, SeedReading,
+        WordReading)
+    words = ["abandon"] * 11 + ["about"]
+
+    def reading(second: float, last: str = "about"):
+        return SeedReading("list", [WordReading(None, [(w, 0.0), ("zoo", second)]) for w in words[:11]]
+                           + [WordReading(None, [(last, 0.0), ("zoo", second)])])
+
+    sure = reading(-20.0)
+    assert sure.analyze().status == "valid" and sure.trust().level == TRUST_HIGH
+    assert not sure.trust().verified
+
+    unsure = reading(-0.5)
+    analysis = unsure.analyze()
+    assert analysis.status == "uncertain"
+    assert unsure.trust().level == (TRUST_MEDIUM if analysis.confidence >= 0.5 else TRUST_LOW)
+
+    invalid = reading(-20.0, last="abandon")
+    assert invalid.analyze().status == "invalid" and invalid.trust().level == TRUST_LOW
+
+    mismatch = reading(-20.0)
+    mismatch.fingerprint = SimpleNamespace(status="mismatch")
+    assert mismatch.trust().level == TRUST_LOW
+
+    verified = SeedReading("list", [WordReading(None, [(w, 0.0)]) for w in words])
+    verified.verified = True
+    assert verified.trust().level == TRUST_VERIFIED and verified.trust().verified
+    assert verified.trust({11: "about"}).verified
+    assert not verified.trust({11: "actual"}).verified

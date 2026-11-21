@@ -155,6 +155,35 @@ def test_fingerprint_line_left_out_of_a_list():
 
 
 
+def numbered_list(words: list[str], fp: str, where: str) -> Image.Image:
+    """ Photo of a numbered list printed in capitals, its fingerprint unnumbered above, below or beside it. """
+    font = ImageFont.truetype(FONT_PATH, 46)
+    image = Image.new("L", (1500, 1800), 90)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((120, 100, 1400, 1700), fill=225)
+    top = 300 if where == "above" else 180
+    for i, w in enumerate(words):
+        draw.text((260, top + i * 100), f"{i + 1}. {w.upper()}", fill=35, font=font)
+    x, y = {"above": (260, 180), "below": (260, top + len(words) * 100 + 20), "beside": (900, top + 500)}[where]
+    draw.text((x, y), fp.upper(), fill=35, font=font)
+    return image
+
+
+
+def test_fingerprint_of_a_numbered_list_is_checked():
+    """ A list counted by its numbers: the unnumbered line of its fingerprint, above, below or beside the words,
+    is tried as the fingerprint before being taken for a word left out, and verifies the seed. """
+    from embit import bip39
+    from seedsigner.helpers.handwriting import read_seed
+    words = bip39.mnemonic_from_bytes(bytes(random.Random(5).getrandbits(8) for _ in range(16))).split()
+    for where in ("above", "below", "beside"):
+        reading = read_seed(numbered_list(words, fingerprint.seed_fingerprint(words), where))
+        analysis = reading.analyze()
+        assert reading.verified and reading.fingerprint.status == "verified", where
+        assert analysis.mnemonic == words and not analysis.uncertain, where
+
+
+
 def test_word_line_never_left_out():
     """ A 13th line that is a word stays a word: the list is not a seed. """
     from embit import bip39

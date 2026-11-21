@@ -110,6 +110,10 @@ ORIENTATION_MARGIN = 1.0
 CROP_VARIANTS = ((0.6, 0.85, 0.75), (0.6, 1.1, 1.0), (1.2, 0.8, 0.7))
 # Crops of a line given to the fingerprint judge, first one accepted: first reading, lower band
 FINGERPRINT_CROPS = (CROP_VARIANTS[0], (0.6, 0.6, 0.5))
+# Lines outside the words tried as the fingerprint: at least this long (text heights; 8 hexadecimal digits are
+# longer), the longest ones first, at most this many
+FINGERPRINT_MIN_LENGTH = 2.0
+FINGERPRINT_MAX_LINES = 3
 
 # Expected duration on a Pi Zero, in seconds (see Progress in __init__.py): network and decoding, reading of a number
 DETECTOR_COST = 1.8
@@ -1078,8 +1082,28 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
     if count not in page.SEED_LENGTHS:
         raise WordsNotFound(f"{count} lines found", at_edge=at_edge, line_count=count, card=g >= 0 and at_edge)
     lines = [b for c in columns for b in c]
+    spare_line = None
+    if spare is None and fingerprint is not None:
+        # a line of the document outside the words (above, below or beside them, numbered or not, with a list
+        # counted by its numbers too) is tried as the fingerprint before it is taken for a word left out
+        left = [copy_box(b) for b in det.words if b.score > 0 and det.card_of(b.center) in (g, -1)
+                and not any(covers(line, b.center) for line in lines)]
+        h = float(np.median([b.h for b in lines]))
+        tried = sorted((line for column in group_lines(left) for line in column
+                        if (line.a1 - line.a0) >= FINGERPRINT_MIN_LENGTH * h),
+                       key=lambda line: -(line.a1 - line.a0))[:FINGERPRINT_MAX_LINES]
+        accepted = []
+        for line in tried:
+            pieces = sorted((b for b in left if covers(line, b.center)), key=lambda b: b.a0)
+            for box, margins in itertools.product([line] + pieces[-1:] * (len(pieces) > 1), FINGERPRINT_CROPS):
+                crop = rectified_crop(image, det.to_photo(box.quad(margins)), fill)
+                if fingerprint(crop):
+                    accepted.append((line, crop))
+                    break
+        if len(accepted) == 1:
+            spare_line, spare = accepted[0]
     extra = [(b.score, (b.a1 - b.a0) / b.h, det.card_of(b.center) != g) for b in det.words
-             if not any(covers(line, b.center) for line in lines)]
+             if not any(covers(line, b.center) for line in lines + ([spare_line] if spare_line else []))]
     numbers = number_groups.get(g, [])
     linked = anchored["numbers"] if anchored else link_numbers(det, lines, numbers)
     quads = [[det.to_photo(b.quad(m)) for b in lines] for m in CROP_VARIANTS]

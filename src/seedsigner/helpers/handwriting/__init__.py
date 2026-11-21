@@ -108,7 +108,15 @@ FINGERPRINT_FIT = -21.0
 # judged by the fingerprint network alone, with the same thresholds (real photos of the Pi, 21/11/2026: a lowercase
 # fingerprint at a margin of 19 and a fit of -22.6 by the word networks, 27.7 and +0.6 by the fingerprint network;
 # the word lines of the same photos at -20 or below for all three). The fingerprint network is loaded only then.
-FINGERPRINT_RESCUE_MARGIN = 12.0
+# Lowered from 12 to 10 with the detector of 21/11/2026 (tuning benches: 4 more exact seeds, no wrong seed verified).
+FINGERPRINT_RESCUE_MARGIN = 10.0
+# A list with one line too many none of which passes these thresholds: the one line read by the fingerprint network
+# with a margin of at least LOOSE_FINGERPRINT_MARGIN (and a fit of at least FINGERPRINT_FIT) is left out as a
+# fingerprint hypothesis, kept only if the fingerprint matches one of the seeds read (verified); otherwise the list
+# is not found, as without it. Real photos of the Pi, 21/11/2026 (grid of 3 columns numbered by rows, fingerprint
+# above, its 9 written with a tail and read as a g by the word networks): fingerprint line at +5, word lines of the
+# same photos at -26 or below.
+LOOSE_FINGERPRINT_MARGIN = 0.0
 
 # The fingerprint line is checked against the FINGERPRINT_CANDIDATES most
 # probable valid seeds of the readings (every reading order, network and
@@ -123,6 +131,12 @@ FINGERPRINT_RESCUE_MARGIN = 12.0
 # 0.005 s; measured with embit on 20/11/2026) and its check, seconds.
 FINGERPRINT_CANDIDATES = 3
 FINGERPRINT_COST = 0.1
+# The fingerprint line is read three times: as cut, and without FINGERPRINT_TRIM of its height at the top, then at
+# the bottom; the probability of a fingerprint is the mean of the three (FingerprintCheck), which still sums to 1 over
+# the strings of 8 digits, so the bound of fingerprint.MIN_MATCH_PROBABILITY is unchanged. A single cut is too
+# sensitive to its edges: on a real photo of the Pi (21/11/2026, nines written with a tail), the probability of the
+# right fingerprint went from 9e-6 to 3e-2 when the cut moved by 2 % of its height.
+FINGERPRINT_TRIM = 0.02
 
 # Guards of a valid seed (see guard), chosen on simulated pages kept apart
 # from the tests and on the development half of the real photos:
@@ -656,6 +670,25 @@ def is_fingerprint(crop: Image.Image) -> bool:
 
 
 
+def fingerprint_hypothesis_margin(crop: Image.Image) -> float | None:
+    """
+        Margin of the line on `crop` read as a fingerprint by the fingerprint
+        network (fingerprint.margins), if it is at least
+        LOOSE_FINGERPRINT_MARGIN with a fit of at least FINGERPRINT_FIT, else
+        None. Used only when no line of a list with one line too many passes
+        is_fingerprint: the line is then left out as a hypothesis, kept only
+        if its fingerprint matches a seed read.
+    """
+    ink = normalize_word(crop)
+    if ink is None:
+        return None
+    _, decoder, _ = load_engine()
+    log_probs = fingerprint_network().log_probs(ink)
+    margin, fit = fingerprint.margins(log_probs, decoder.scores(log_probs))
+    return margin if margin >= LOOSE_FINGERPRINT_MARGIN and fit >= FINGERPRINT_FIT else None
+
+
+
 def fingerprint_accepted(found: list[tuple[float, float]] | None) -> bool:
     """
         True if the margins of a line by both networks (fingerprint_margins)
@@ -758,6 +791,12 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
         progress.step(WORD_COST + OTHER_WORD_COST)
         return is_fingerprint(crop)
 
+    def hypothesis_margin(crop):
+        progress.step(WORD_COST)
+        return fingerprint_hypothesis_margin(crop)
+
+    spare_line.margin = hypothesis_margin
+
     def attempt(crossed: bool):
         pool = []
 
@@ -771,6 +810,11 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             guard(reading)
         if reading.fingerprint_crop is not None:
             reading = check_fingerprint(reading, pool, progress)
+        if getattr(reading.layout if hasattr(reading, "layout") else None, "fingerprint_hypothesis", False) \
+                and not getattr(reading, "verified", False):
+            # a line left out as a fingerprint hypothesis whose fingerprint matches no seed read: the list has one
+            # line too many, as without the hypothesis
+            return None, reading.layout.not_found
         return reading, None
 
     def rank(reading):
@@ -806,10 +850,15 @@ def check_fingerprint(reading: SeedReading, pool: list, progress: Progress) -> S
         (`verified`), or `reading` with every word uncertain; the check is in
         `fingerprint` of the reading returned.
     """
-    ink = normalize_word(reading.fingerprint_crop)
-    if ink is None:
+    crop = reading.fingerprint_crop
+    w, h = crop.size
+    trim = round(FINGERPRINT_TRIM * h)
+    crops = [crop] + ([crop.crop((0, trim, w, h)), crop.crop((0, 0, w, h - trim))] if trim else [])
+    inks = [ink for ink in (normalize_word(c) for c in crops) if ink is not None]
+    if not inks:
         return reading
-    check = fingerprint.FingerprintCheck([fingerprint.FingerprintReading(fingerprint_network().log_probs(ink))])
+    check = fingerprint.FingerprintCheck([fingerprint.FingerprintReading(fingerprint_network().log_probs(ink))
+                                          for ink in inks])
     candidates, seen = [], set()
     for _, seed, words in sorted(pool, key=lambda item: item[0]):
         if tuple(seed) not in seen and len(candidates) < FINGERPRINT_CANDIDATES:

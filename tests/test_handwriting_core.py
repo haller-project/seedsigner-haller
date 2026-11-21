@@ -66,7 +66,7 @@ def test_haller_1_weights():
     expected = {
         "haller-1-capitals.npz": "2e9275f1acd0d347437e856160430e96a283ec484a48ab96a2ea1ca91531fe14",
         "haller-1-lowercase.npz": "5d340b354ced032992cb474f03bcc0b063f24ee8e1446d2953203b778652e509",
-        "haller-1-detector.npz": "8ddddf19ee0088e8dcfe71ba12377167feeb6a626cd6edb17b0bed3b5f69fc5b",
+        "haller-1-detector.npz": "b33f6d02f1af87a4aff1cecc73368cc2230c2fa68d0eda977a112df437d501cc",
     }
     for name, sha256 in expected.items():
         with open(os.path.join(os.path.dirname(MODEL_PATH), name), "rb") as f:

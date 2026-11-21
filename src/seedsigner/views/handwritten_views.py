@@ -107,7 +107,8 @@ class HandwrittenReadView(View):
         try:
             reading = self.run_screen(HandwrittenReadingScreen, read_function=read_function)
         except WordsNotFound as e:
-            return Destination(HandwrittenReadFailedView, view_args={"at_edge": e.at_edge, "line_count": e.line_count, "card": e.card}, skip_current_view=True)
+            return Destination(HandwrittenReadFailedView, view_args={"at_edge": e.at_edge, "line_count": e.line_count, "card": e.card,
+                                                                     "small": getattr(e, "small", False)}, skip_current_view=True)
 
         return Destination(HandwrittenStatusView, view_args={"review": HandwrittenReview(reading)}, skip_current_view=True)
 
@@ -118,15 +119,17 @@ class HandwrittenReadFailedView(View):
     `at_edge`: the words reach the edge of the photo, so some are probably cut off.
     `line_count`: number of words found, when it is not a valid seed length.
     `card`: the words are those of a seed card, part of which is out of the photo.
+    `small`: faint writing was seen, too small in the photo to be read.
     """
     RETAKE = ButtonOption("Retake photo", FontAwesomeIconConstants.CAMERA)
     CANCEL = ButtonOption("Cancel")
 
-    def __init__(self, at_edge: bool = False, line_count: int = 0, card: bool = False):
+    def __init__(self, at_edge: bool = False, line_count: int = 0, card: bool = False, small: bool = False):
         super().__init__()
         self.at_edge = at_edge
         self.line_count = line_count
         self.card = card
+        self.small = small
 
 
     def run(self):
@@ -136,6 +139,9 @@ class HandwrittenReadFailedView(View):
         elif self.at_edge:
             status_headline = _("Words cut off")
             text = _("Move the camera back so all the words fit in the photo.")
+        elif self.small:
+            status_headline = _("Words too small")
+            text = _("Move the camera closer so the words fill more of the photo, with good light and no blur.")
         elif self.line_count:
             status_headline = _("{} words found").format(self.line_count)
             text = _("A seed has 12, 15, 18, 21 or 24 words. Check that none is missing.")

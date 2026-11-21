@@ -67,7 +67,8 @@ MIN_GROUP_WORDS = 3           # a document with fewer words is a blank card or n
 ALL = -2                      # document made of every word found, cards and free words together
 MIN_OTHER_WORDS = 6           # words of another document making every word uncertain
 BEYOND_TEXT = 0.3             # writing of a card farther than this many word heights beyond its text: card cut there
-ZOOM_SHARE = 0.4              # documents covering less of the photo are detected again on their region
+ZOOM_SHARE = 0.5              # documents covering less of the photo are detected again on their region (0.4 before
+                              # the detector of 21/11/2026)
 ZOOM_MARGIN = 0.15            # margin of that region, share of its size on each side
 
 # Lines and columns, in word box heights
@@ -141,9 +142,21 @@ CROSSED_OUT = 1.8
 # A word kernel of fewer than SPECK times the median pixels of the kernels of its document is a speck or text seen
 # through the sheet, left out when the count is wrong (same photo: 4 and 7 pixels against a median of 90)
 SPECK = 0.15
-# a number box ending at most this many heights before the start of a line tried as the fingerprint is taken in
-# with it (its first digit read as a line number), the line alone tried next
+# a number box ending at most this many heights before the start of a line tried as the fingerprint, or starting at
+# most this many heights after its end, is taken in with it (its first or last digits read as a number), the line
+# alone tried next
 FINGERPRINT_NUMBER_GAP = 0.6
+
+# No word box found but at least SMALL_PIXELS output pixels of word probability SMALL_WORD_PROBABILITY or more, of a
+# median height under SMALL_HEIGHT output pixels: words too small to be found (real photo of the Pi, 21/11/2026:
+# sheet far from the camera, 8 pixels at 0.2-0.5, height 3.7; words of a readable photo 5.5 or more)
+SMALL_WORD_PROBABILITY = 0.2
+SMALL_PIXELS = 4
+SMALL_HEIGHT = 4.8
+
+# A first or last row of a list holding at most this many pieces is tried as the fingerprint when the other words
+# make a valid count (extra_rows: « FP: 1a2b 3c4d »)
+MAX_EXTRA_ROW_PIECES = 3
 
 # Expected duration on a Pi Zero, in seconds (see Progress in __init__.py): network and decoding, reading of a number
 DETECTOR_COST = 1.8
@@ -322,6 +335,8 @@ class Detection:
         self.maps = maps
         self.to_photo = to_photo
         self.frame = frame  # outward normal of a side of the photo: its position across, in output pixels
+        self.from_photo = None  # photo pixels to output pixels (set by detect)
+        self.first = None  # detection on the whole photo when this one is on the document region (detections)
         words, numbers = sigmoid(maps[WORD]), sigmoid(maps[NUMBER])
         word_kernels = [p for p in components(maps[WORD] > 0) if len(p) >= MIN_KERNEL_PIXELS]
         number_kernels = [p for p in components(maps[NUMBER] > 0) if len(p) >= MIN_KERNEL_PIXELS]
@@ -393,8 +408,35 @@ def detect(photo: Image.Image, region: tuple[int, int, int, int] | None = None) 
     sides = {(0, -1): (y0 <= 0, -oy / 2), (0, 1): (y1 >= photo.height, (oy + h) / 2),
              (-1, 0): (x0 <= 0, -ox / 2), (1, 0): (x1 >= photo.width, (ox + w) / 2)}
     frame = {n: at for n, (on, at) in sides.items() if on}
-    return Detection(network_maps(image),
-                     lambda points: [((2 * u - ox) / s + x0, (2 * v - oy) / s + y0) for u, v in points], frame)
+    det = Detection(network_maps(image),
+                    lambda points: [((2 * u - ox) / s + x0, (2 * v - oy) / s + y0) for u, v in points], frame)
+    det.from_photo = lambda points: [(((x - x0) * s + ox) / 2, ((y - y0) * s + oy) / 2) for x, y in points]
+    return det
+
+
+
+def first_pass_words(det: Detection) -> list[Box]:
+    """
+        Word boxes of the detection on the whole photo (`det.first`) moved to
+        the output pixels of `det` (detection on the document region): both
+        map the photo by a scale and an offset, so a box keeps its direction
+        and its extents scale by the ratio of the two. Empty without a first
+        detection.
+    """
+    first = det.first
+    if first is None or det.from_photo is None:
+        return []
+    (x0, y0), (x1, y1) = det.from_photo(first.to_photo([(0.0, 0.0), (1.0, 0.0)]))
+    k = math.hypot(x1 - x0, y1 - y0)
+    moved = []
+    for b in first.words:
+        if b.score <= 0:
+            continue
+        m = copy_box(b)
+        m.a0, m.a1, m.c, m.h = k * b.a0 + x0 * b.ux + y0 * b.uy, k * b.a1 + x0 * b.ux + y0 * b.uy, \
+            k * b.c - x0 * b.uy + y0 * b.ux, k * b.h
+        moved.append(m)
+    return moved
 
 
 
@@ -524,19 +566,24 @@ class InkStats:
 
 
 
-def with_number(line: Box, numbers: list[Box]) -> Box | None:
+def with_number(line: Box, numbers: list[Box], after: bool = False) -> Box | None:
     """
         The line widened to the number boxes centered before its start on its
         line and ending at most FINGERPRINT_NUMBER_GAP heights before it, or
         overlapping it (a first digit of a fingerprint taken for a line number), or None
-        if there is none.
+        if there is none. With `after`, also widened to the number boxes
+        running past its end and starting at most FINGERPRINT_NUMBER_GAP
+        heights after it (last digits of a fingerprint taken for a number).
     """
-    before = [n for n in numbers if abs(n.c - line.c) < SAME_LINE * max(line.h, n.h)
-              and n.middle < line.a0 and n.a1 >= line.a0 - FINGERPRINT_NUMBER_GAP * line.h]
-    if not before:
+    on_line = [n for n in numbers if abs(n.c - line.c) < SAME_LINE * max(line.h, n.h)]
+    before = [n for n in on_line if n.middle < line.a0 and n.a1 >= line.a0 - FINGERPRINT_NUMBER_GAP * line.h]
+    beyond = [n for n in on_line if after and n.middle > line.middle and n.a1 > line.a1
+              and n.a0 <= line.a1 + FINGERPRINT_NUMBER_GAP * line.h]
+    if not before and not beyond:
         return None
     wide = copy_box(line)
-    wide.a0 = min(n.a0 for n in before)
+    wide.a0 = min([n.a0 for n in before] + [line.a0])
+    wide.a1 = max([n.a1 for n in beyond] + [line.a1])
     return wide
 
 
@@ -711,7 +758,27 @@ def aligned_columns(boxes: list[Box]) -> list[list[Box]] | None:
 
 
 
-def row_words(boxes: list[Box]) -> list[list[Box]] | None:
+def chained_rows(boxes: list[Box], h: float) -> list[list[Box]]:
+    """
+        Rows of boxes followed from one box to the next along the text: each
+        box, from the start of the rows, joins the row whose last box is
+        nearest across the text, within SAME_LINE heights (a slanted row
+        drifts across the text more than SAME_LINE heights from start to end,
+        never between two neighbouring words). Rows top to bottom.
+    """
+    rows = []
+    for b in sorted(boxes, key=lambda b: b.a0):
+        near = [(abs(b.c - row[-1].c), k) for k, row in enumerate(rows)
+                if abs(b.c - row[-1].c) < SAME_LINE * max(h, b.h) and not stacked(row[-1], b)]
+        if near:
+            rows[min(near)[1]].append(b)
+        else:
+            rows.append([b])
+    return sorted(rows, key=lambda row: float(np.mean([b.c for b in row])))
+
+
+
+def row_words(boxes: list[Box], chained: bool = False) -> list[list[Box]] | None:
     """
         Words written one after the other along a few rows, without columns
         (« wide toss supply version motor / pupil toy … »): rows of boxes on
@@ -719,10 +786,67 @@ def row_words(boxes: list[Box]) -> list[list[Box]] | None:
         heights, read left to right, row after row. Every row but the last
         holds at least MIN_ROW_WORDS words and every word is at least
         MIN_ROW_WORD_LENGTH heights long. The rows, as lists of words, or None.
+        With `chained`, the rows are followed from box to box (chained_rows,
+        slanted rows close to each other) and every box is a word.
     """
     if len(boxes) < MIN_ROW_WORDS:
         return None
     boxes = [copy_box(b) for b in boxes]
+    h = float(np.median([b.h for b in boxes]))
+    if chained:
+        words = [sorted(row, key=lambda b: b.a0) for row in chained_rows(boxes, h)]
+    else:
+        rows = []
+        for b in sorted(boxes, key=lambda b: b.c):
+            if rows and abs(b.c - np.mean([x.c for x in rows[-1]])) < SAME_LINE * max(h, b.h):
+                rows[-1].append(b)
+            else:
+                rows.append([b])
+        words = []
+        for row in rows:
+            row.sort(key=lambda b: b.a0)
+            merged = [row[0]]
+            for b in row[1:]:
+                if b.a0 - merged[-1].a1 > GRID_WORD_GAP * h or stacked(merged[-1], b):
+                    merged.append(b)
+                else:
+                    merged[-1].merge(b)
+            words.append(merged)
+    if any(len(r) < MIN_ROW_WORDS for r in words[:-1]):
+        return None
+    if any(b.a1 - b.a0 < MIN_ROW_WORD_LENGTH * h for r in words for b in r):
+        return None
+    return words
+
+
+
+def word_columns(boxes: list[Box]) -> list[list[Box]] | None:
+    """
+        Columns of the words of `boxes` as find_words makes them without
+        numbers: lines in columns (group_lines), or else a grid of words
+        written in rows (grid_columns, aligned_columns), if one of them has a
+        valid number of words; None otherwise.
+    """
+    columns = group_lines([copy_box(b) for b in boxes])
+    if sum(len(c) for c in columns) in page.SEED_LENGTHS:
+        return columns
+    for other in (grid_columns(boxes), aligned_columns(boxes)):
+        if other is not None and sum(len(c) for c in other) in page.SEED_LENGTHS:
+            return other
+    return None
+
+
+
+def extra_rows(boxes: list[Box]) -> list[tuple[Box, list[Box], list[list[Box]]]]:
+    """
+        The first and the last row of `boxes` (boxes on the same line across
+        the whole document) holding at most MAX_EXTRA_ROW_PIECES pieces split
+        where the gap exceeds GRID_WORD_GAP heights, when the other boxes make
+        columns of a valid number of words (word_columns): (the row as one
+        line, its boxes along the text, those columns) for each.
+    """
+    if len(boxes) < MIN_GROUP_WORDS + 1:
+        return []
     h = float(np.median([b.h for b in boxes]))
     rows = []
     for b in sorted(boxes, key=lambda b: b.c):
@@ -730,21 +854,20 @@ def row_words(boxes: list[Box]) -> list[list[Box]] | None:
             rows[-1].append(b)
         else:
             rows.append([b])
-    words = []
-    for row in rows:
-        row.sort(key=lambda b: b.a0)
-        merged = [row[0]]
+    found = []
+    for row in ([rows[0], rows[-1]] if len(rows) > 1 else []):
+        row = sorted(row, key=lambda b: b.a0)
+        pieces = 1 + sum(b.a0 - a.a1 > GRID_WORD_GAP * h for a, b in zip(row, row[1:]))
+        if pieces > MAX_EXTRA_ROW_PIECES:
+            continue
+        columns = word_columns([b for b in boxes if not any(b is x for x in row)])
+        if columns is None:
+            continue
+        line = copy_box(row[0])
         for b in row[1:]:
-            if b.a0 - merged[-1].a1 > GRID_WORD_GAP * h or stacked(merged[-1], b):
-                merged.append(b)
-            else:
-                merged[-1].merge(b)
-        words.append(merged)
-    if any(len(r) < MIN_ROW_WORDS for r in words[:-1]):
-        return None
-    if any(b.a1 - b.a0 < MIN_ROW_WORD_LENGTH * h for r in words for b in r):
-        return None
-    return words
+            line.merge(copy_box(b))
+        found.append((line, row, columns))
+    return found
 
 
 
@@ -1177,7 +1300,8 @@ def detections(image: Image.Image, step) -> Detection:
         step(DETECTOR_COST)
         region = document_region(det, image.size)
         if region:
-            det = detect(image, region)
+            first, det = det, detect(image, region)
+            det.first = first
             step(DETECTOR_COST)
         _detections[key] = det
     return _detections[key]
@@ -1272,7 +1396,11 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         if candidates[-1][0]:
             candidates = [candidates[-1]]
     if not candidates:
-        raise WordsNotFound("no words found")
+        # faint writing lower than any word box: words too small in the photo (sheet far from the camera)
+        faint = sigmoid(det.maps[WORD]) >= SMALL_WORD_PROBABILITY
+        small = int(faint.sum()) >= SMALL_PIXELS \
+            and float(np.median(det.maps[HEIGHT][faint])) * HEIGHT_SCALE < SMALL_HEIGHT
+        raise WordsNotFound("words too small" if small else "no words found", small=small)
     # a card cut by the frame is read only if no whole document has a valid number of words, and does not make
     # the reading of another one uncertain
     candidates.sort(key=lambda m: m[:3], reverse=True)
@@ -1298,10 +1426,13 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
             columns, count = aligned, sum(len(c) for c in aligned)
     in_rows = False
     if g < 0 and anchored is None and count not in page.SEED_LENGTHS:
-        rows = row_words(groups[g])
-        if rows is not None and sum(len(r) for r in rows) in page.SEED_LENGTHS:
-            # words written in rows: each row is taken as a column, read in that order only
-            columns, count, in_rows = rows, sum(len(r) for r in rows), True
+        for chained in (False, True):
+            rows = row_words(groups[g], chained)
+            if rows is not None and sum(len(r) for r in rows) in page.SEED_LENGTHS:
+                # words written in rows: each row is taken as a column, read in that order only; rows followed from
+                # box to box (slanted rows close to each other) only if the rows as lines do not give a valid count
+                columns, count, in_rows = rows, sum(len(r) for r in rows), True
+                break
     if g < 0 and count not in page.SEED_LENGTHS and len(columns) > 1:
         # short columns mostly on the frame are text of another sheet
         kept = [c for c in columns if len(c) >= MIN_COLUMN_LINES
@@ -1310,26 +1441,50 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
             columns, count = kept, sum(len(c) for c in kept)
     fill = int(np.median(np.asarray(image.reduce(16))))
     spare = spare_first = None
-    if g < 0 and anchored is None and count not in page.SEED_LENGTHS and count - 1 in page.SEED_LENGTHS \
-            and fingerprint is not None:
-        accepted = []
-        for c, i in page.spare_lines(columns):
-            line = columns[c][i]
+    hypothesis = False
+    if g < 0 and anchored is None and count not in page.SEED_LENGTHS and fingerprint is not None:
+        # lines that may be a fingerprint written with the words: (line, its pieces, columns of the words without it)
+        tried = []
+        if count - 1 in page.SEED_LENGTHS:
+            for c, i in page.spare_lines(columns):
+                line = columns[c][i]
+                rest = [[b for j, b in enumerate(column) if (k, j) != (c, i)] for k, column in enumerate(columns)]
+                tried.append((line, sorted((b for b in groups[g] if covers(line, b.center)), key=lambda b: b.a0),
+                              [column for column in rest if column]))
+        for line, pieces, rest in extra_rows(groups[g]):
+            # first or last row of the document (a grid whose columns are too close to be told apart, a fingerprint
+            # in a cell of the grid): tried if the words without it make a valid count
+            if not any(covers(t[0], line.center) for t in tried):
+                tried.append((line, pieces, rest))
+        accepted, crops = [], {}
+        for t, (line, pieces, rest) in enumerate(tried):
             # the whole line, then its last word alone (a fingerprint written after a label: "fp: 1a2b3c4d")
-            pieces = sorted((b for b in groups[g] if covers(line, b.center)), key=lambda b: b.a0)
-            wide = with_number(line, number_groups.get(g, []))
+            wide = with_number(line, number_groups.get(g, []), after=True)
             for box, margins in itertools.product([wide] * (wide is not None) + [line] + pieces[-1:] * (len(pieces) > 1),
                                                   FINGERPRINT_CROPS):
                 crop = rectified_crop(image, det.to_photo(box.quad(margins)), fill)
+                crops.setdefault(t, []).append(crop)
                 if fingerprint(crop):
-                    accepted.append((c, i, crop))
+                    accepted.append((t, crop))
                     break
+        margin_of = getattr(fingerprint, "margin", None)
+        if not accepted and margin_of is not None:
+            # no line passes the thresholds: the line read best as 8 hexadecimal digits by the fingerprint network is
+            # left out as a hypothesis (layout.fingerprint_hypothesis), kept by read_seed only if its fingerprint
+            # matches a seed read (handwriting.LOOSE_FINGERPRINT_MARGIN)
+            # margin_of(crop): margin of the line read as a fingerprint, or None below the threshold; exactly one
+            # line must pass it, its first crop passing it taken (the widest first, as above)
+            passing = []
+            for t, found in crops.items():
+                crop = next((crop for crop in found if margin_of(crop) is not None), None)
+                if crop is not None:
+                    passing.append((t, crop))
+            if len(passing) == 1:
+                accepted, hypothesis = passing, True
         if len(accepted) == 1:
-            c, i, spare = accepted[0]
-            spare_first = columns[c][i]
-            columns = [[b for j, b in enumerate(column) if (k, j) != (c, i)] for k, column in enumerate(columns)]
-            columns = [column for column in columns if column]
-            count -= 1
+            t, spare = accepted[0]
+            spare_first, _, columns = tried[t]
+            count = sum(len(c) for c in columns)
     at_edge = any(column_at_edge(c, size) for c in columns) \
         or any(touches_frame(det.to_photo(b.quad()), image.size) for c in columns for b in c)
     if count not in page.SEED_LENGTHS:
@@ -1341,6 +1496,11 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         # counted by its numbers too) is tried as the fingerprint before it is taken for a word left out
         left = [copy_box(b) for b in det.words if b.score > 0 and det.card_of(b.center) in (g, -1)
                 and not any(covers(line, b.center) for line in lines)]
+        # boxes of the detection on the whole photo that the detection on the document region missed (a line of
+        # digits seen only at the lower resolution), for the fingerprint only
+        left += [b for b in first_pass_words(det) if det.card_of(b.center) in (g, -1)
+                 and not any(covers(line, b.center) for line in lines)
+                 and not any(covers(w, b.center) or covers(b, w.center) for w in det.words)]
         h = float(np.median([b.h for b in lines]))
         tried = sorted((line for column in group_lines(left) for line in column
                         if (line.a1 - line.a0) >= FINGERPRINT_MIN_LENGTH * h),
@@ -1348,7 +1508,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         accepted = []
         for line in tried:
             pieces = sorted((b for b in left if covers(line, b.center)), key=lambda b: b.a0)
-            wide = with_number(line, det.numbers)
+            wide = with_number(line, det.numbers, after=True)
             for box, margins in itertools.product([wide] * (wide is not None) + [line] + pieces[-1:] * (len(pieces) > 1),
                                                   FINGERPRINT_CROPS):
                 crop = rectified_crop(image, det.to_photo(box.quad(margins)), fill)
@@ -1431,6 +1591,8 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
                         complete=not (at_edge or ambiguous))
     layout.doubtful = anchored["synthetic"] if anchored else set()
     layout.fingerprint = spare
+    layout.fingerprint_hypothesis = hypothesis
+    layout.not_found = WordsNotFound(f"{count + 1} lines found", at_edge=at_edge, line_count=count + 1) if hypothesis else None
     layout.lengths = [getattr(b, "ink", b.a1 - b.a0) / b.h for b in lines]
     layout.extra_words = extra
     layout.orders_found = orders_found

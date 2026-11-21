@@ -3,7 +3,7 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 # Must import test base before the Controller
 from base import BaseTest, FlowTest, FlowStep, FlowTestInvalidButtonDataSelectionException
@@ -503,34 +503,48 @@ class TestHandwrittenScanScreen(HandwrittenScreenTestBase):
         mock_camera.stop_single_frame_mode.assert_called_once()
 
 
-    def test_preview_fills_display(self):
+    def test_preview_shows_whole_frame(self):
         """
-        The preview fills the whole display with the center of the camera frame, so that
-        everything visible on the display is in the photo.
+        The preview shows the whole camera frame, as large as the display allows, and
+        the instructions are drawn beside it without covering it.
         """
-        # Portrait frame (as returned after rotation): left half red, right half blue,
-        # with green bands at the top and bottom that only the photo keeps
+        # Portrait frame (as returned after rotation) with lime bands at the top and
+        # bottom, which must stay visible
         frame = Image.new("RGB", (240, 320), "red")
-        frame.paste("blue", (120, 0, 240, 320))
         frame.paste("lime", (0, 0, 240, 40))
         frame.paste("lime", (0, 280, 240, 320))
         mock_camera = MagicMock()
         mock_camera.read_single_frame_preview.return_value = frame
+        mock_camera.capture_jpeg.return_value = make_photo()
+
+        canvas = Image.new("RGB", (240, 240))
+        self.mock_renderer.canvas = canvas
+        self.mock_renderer.draw = ImageDraw.Draw(canvas)
+        shown = []
+        self.mock_renderer.show_image.side_effect = lambda: shown.append(canvas.copy())
 
         screen = self.build_screen(mock_camera, left_script=[], anyclick_script=[False, True])
-        pasted = []
-        self.mock_renderer.canvas.paste.side_effect = lambda image, xy: pasted.append((image.copy(), xy))
         screen._run()
 
-        image, xy = pasted[0]
-        assert xy == (0, 0) and image.size == (240, 240)
-        assert image.getpixel((5, 5)) == (255, 0, 0) and image.getpixel((234, 234)) == (0, 0, 255)
+        preview, capturing = shown
+        # The image is 180 x 240, centered: its top and bottom bands are visible and
+        # nothing is drawn over it
+        assert preview.getpixel((120, 2)) == (0, 255, 0) and preview.getpixel((120, 237)) == (0, 255, 0)
+        assert all(preview.getpixel((x, y)) == (255, 0, 0) for x in range(31, 209, 4) for y in range(32, 208, 4))
+        assert preview.getpixel((29, 120)) == (0, 0, 0) and preview.getpixel((210, 120)) == (0, 0, 0)
 
-        # A landscape frame (other camera rotation) is cropped at its sides
-        landscape = Image.new("RGB", (320, 240), "lime")
-        landscape.paste("red", (40, 0, 280, 240))
-        image = screen.fill_display(landscape)
-        assert image.size == (240, 240) and image.getpixel((1, 120)) == (255, 0, 0)
+        # The instructions are in the side bands, the capture message replaces the
+        # one on the right
+        def lit(image, box):
+            return sum(1 for x in range(box[0], box[2]) for y in range(box[1], box[3]) if image.getpixel((x, y)) != (0, 0, 0))
+        assert lit(preview, (0, 0, 30, 240)) > 50 and lit(preview, (210, 0, 240, 240)) > 50
+        assert lit(capturing, (210, 0, 240, 240)) > lit(preview, (210, 0, 240, 240))
+        assert capturing.crop((30, 0, 210, 240)).tobytes() == preview.crop((30, 0, 210, 240)).tobytes()
+
+        # A landscape frame (other camera rotation) takes the whole width, the
+        # instructions go below it
+        image, xy = screen.fit_display(Image.new("RGB", (320, 240)))
+        assert image.size == (240, 180) and xy == (0, 30)
 
 
     def test_back_button(self):

@@ -22,10 +22,12 @@ class HandwrittenScanScreen(BaseScreen):
     the full resolution of the camera and returns it as JPEG data (decoded by
     `Camera.decode_frame()`); KEY_LEFT returns RET_CODE__BACK_BUTTON.
 
-    The preview comes from the camera that takes the photo and fills the display with
-    the center of its field of view: everything visible is in the photo, which also
-    keeps the margins cut off from the preview. The photo is taken without delay after
-    the click.
+    The preview comes from the camera that takes the photo and shows its whole field of
+    view, as large as the display allows: what is photographed is exactly what is shown.
+    The instructions are drawn in the bands left free beside the image (vertical text,
+    "back" on the side of the joystick, "click" on the side of the buttons), or below it
+    when the image is wider than tall, and never cover it. The photo is taken without
+    delay after the click.
     """
     # Full resolution of the OV5647 sensor; the sensor only provides it at up to 15fps,
     # and the framerate also caps the exposure time (1/15s instead of 1/24s in dim light).
@@ -46,30 +48,37 @@ class HandwrittenScanScreen(BaseScreen):
         self.instructions_font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.get_button_font_size())
 
 
-    def fill_display(self, frame: Image.Image) -> Image.Image:
+    def fit_display(self, frame: Image.Image) -> tuple[Image.Image, tuple[int, int]]:
         """
-        The center of `frame`, scaled to fill the whole display. The parts of the frame
-        cut off are still in the photo: everything visible on the display is photographed.
+        The whole `frame`, scaled to the largest size that fits in the display, and the
+        position that centers it.
         """
-        scale = max(self.canvas_width / frame.width, self.canvas_height / frame.height)
-        width, height = self.canvas_width / scale, self.canvas_height / scale
-        left, top = (frame.width - width) / 2, (frame.height - height) / 2
-        return frame.resize((self.canvas_width, self.canvas_height), box=(left, top, left + width, top + height))
+        scale = min(self.canvas_width / frame.width, self.canvas_height / frame.height)
+        width, height = round(frame.width * scale), round(frame.height * scale)
+        return frame.resize((width, height)), ((self.canvas_width - width) // 2, (self.canvas_height - height) // 2)
 
 
-    def _render_instructions(self, text: str, color: str):
-        self.renderer.draw.text(
-            xy=(
-                int(self.canvas_width/2),
-                self.canvas_height - GUIConstants.EDGE_PADDING
-            ),
-            text=text,
-            fill=color,
-            font=self.instructions_font,
-            stroke_width=4,
-            stroke_fill=GUIConstants.BACKGROUND_COLOR,
-            anchor="ms"
-        )
+    def _render_frame(self, frame: Image.Image, left_text: str, right_text: str, right_color: str):
+        """
+        Draws the whole `frame` and the instructions around it: `left_text` and
+        `right_text` read from bottom to top in the side bands, or side by side in the
+        band below a frame wider than tall.
+        """
+        image, (x, y) = self.fit_display(frame)
+        self.renderer.draw.rectangle((0, 0, self.canvas_width, self.canvas_height), fill=GUIConstants.BACKGROUND_COLOR)
+        self.renderer.canvas.paste(image, (x, y))
+
+        if x > 0:
+            for text, color, band_left in ((left_text, GUIConstants.BODY_FONT_COLOR, 0),
+                                           (right_text, right_color, x + image.width)):
+                label = Image.new("RGB", (self.canvas_height, x), GUIConstants.BACKGROUND_COLOR)
+                ImageDraw.Draw(label).text((self.canvas_height // 2, x // 2), text, fill=color, font=self.instructions_font, anchor="mm")
+                self.renderer.canvas.paste(label.rotate(90, expand=True), (band_left, 0))
+        else:
+            band_center = (y + image.height + self.canvas_height) // 2
+            for text, color, center in ((left_text, GUIConstants.BODY_FONT_COLOR, self.canvas_width // 4),
+                                        (right_text, right_color, self.canvas_width * 5 // 8)):
+                self.renderer.draw.text((center, band_center), text, fill=color, font=self.instructions_font, anchor="mm")
 
 
     def _capture_photo(self) -> bytes:
@@ -83,6 +92,7 @@ class HandwrittenScanScreen(BaseScreen):
         # If the user continues holding the button that brought them into this screen,
         # it must not take the photo: only a click after all buttons were released does.
         is_maybe_still_holding = True
+        frame = None
 
         while True:
             if self.hw_inputs.check_for_low(HardwareButtonsConstants.KEY_LEFT):
@@ -97,16 +107,16 @@ class HandwrittenScanScreen(BaseScreen):
             elif not is_maybe_still_holding:
                 self.hw_inputs.update_last_input_time()
 
-                with self.renderer.lock:
-                    self._render_instructions(_("Capturing image..."), GUIConstants.ACCENT_COLOR)
-                    self.renderer.show_image()
+                if frame is not None:
+                    with self.renderer.lock:
+                        self._render_frame(frame, "< " + _("back"), _("Capturing image..."), GUIConstants.ACCENT_COLOR)
+                        self.renderer.show_image()
 
                 return self._capture_photo()
 
-            frame = self.fill_display(self.camera.read_single_frame_preview(self.PREVIEW_RESOLUTION))
+            frame = self.camera.read_single_frame_preview(self.PREVIEW_RESOLUTION)
             with self.renderer.lock:
-                self.renderer.canvas.paste(frame, (0, 0))
-                self._render_instructions("< " + _("back") + "  |  " + _("click a button"), GUIConstants.BODY_FONT_COLOR)
+                self._render_frame(frame, "< " + _("back"), _("click a button"), GUIConstants.BODY_FONT_COLOR)
                 self.renderer.show_image()
 
 

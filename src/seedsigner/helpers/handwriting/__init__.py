@@ -117,6 +117,18 @@ FINGERPRINT_RESCUE_MARGIN = 10.0
 # above, its 9 written with a tail and read as a g by the word networks): fingerprint line at +5, word lines of the
 # same photos at -26 or below.
 LOOSE_FINGERPRINT_MARGIN = 0.0
+# Rows at the start or the end of a list that may not be words (detector.extra_line_sets), read when the list is not
+# found or is numbered on most of its lines but not all (read_seed): a row is a label if its best label
+# (fingerprint.LABELS) reads better than its best BIP39 word by LABEL_MARGIN and falls short of the free reading of
+# the networks by at most -LABEL_FIT (means of both networks); it is read as no word if its best BIP39 word falls
+# short of the free reading by more than -NO_WORD_FIT (taken only with a fingerprint, the set of rows being then a
+# hypothesis kept only if verified). Chosen on the tuning pages only (real photos DEV, simulated lists with a
+# fingerprint fpdev, 200 simulated pages with a label kept apart from the tests; 21/11/2026): the right words read
+# (8 428, 776 of them real) reach a label margin of -4.9 at most (-13.5 on the real photos), the rows taken for labels
+# +9 or more for 95 % of them; the cursive "fingerprint" of a real photo is at +2.2.
+LABEL_MARGIN = 0.0
+LABEL_FIT = -15.0
+NO_WORD_FIT = -25.0
 
 # The fingerprint line is checked against the FINGERPRINT_CANDIDATES most
 # probable valid seeds of the readings (every reading order, network and
@@ -265,8 +277,10 @@ class SeedReading:
         self.numbered = False
         self.disputed = False
         self.fingerprint_crop = None
+        self.fingerprint_others = []
         self.fingerprint = None
         self.verified = False
+        self.extra_lines = False
         self._last = None
 
 
@@ -332,6 +346,9 @@ class SeedReading:
         if self.verified and all(self.words[k].candidates[0][0] == w for k, w in (confirmed or {}).items()):
             return Trust(TRUST_VERIFIED)
         if self.fingerprint is not None and self.fingerprint.status == "mismatch":
+            return Trust(TRUST_LOW)
+        if self.extra_lines:
+            # rows of the list read as a fingerprint or a label rather than as words, not verified without them
             return Trust(TRUST_LOW)
         if analysis.status == "valid":
             return Trust(TRUST_HIGH)
@@ -536,6 +553,7 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
     def seed_reading(order):
         reading = SeedReading(layout.kind, [words[k] for k in order], min_seed_probability, layout.complete)
         reading.fingerprint_crop = getattr(layout, "fingerprint", None)
+        reading.fingerprint_others = list(getattr(layout, "fingerprint_others", None) or [])
         reading.layout, reading.order = layout, list(order)
         return reading
 
@@ -689,6 +707,39 @@ def fingerprint_hypothesis_margin(crop: Image.Image) -> float | None:
 
 
 
+def line_role(crops: list[Image.Image]) -> tuple[str | None, Image.Image | None]:
+    """
+        What a row of a list left out of the words reads as, on its crops
+        (widest first): ("fingerprint", crop) if a crop passes is_fingerprint,
+        ("label", None) if one of the first two reads as a label (see
+        LABEL_MARGIN), ("loose", crop) if a crop passes
+        fingerprint_hypothesis_margin, ("other", None) if the first reads as
+        no BIP39 word (NO_WORD_FIT), else (None, None).
+    """
+    for crop in crops:
+        if is_fingerprint(crop):
+            return "fingerprint", crop
+    first, decoder, lowercase = load_engine()
+    other = False
+    for i, crop in enumerate(crops[:2]):
+        ink = normalize_word(crop)
+        if ink is None:
+            continue
+        found = []
+        for network in (first, lowercase):
+            log_probs = network.log_probs(ink)
+            found.append(fingerprint.label_margins(log_probs, decoder.scores(log_probs)))
+        margin, fit, word_fit = (sum(f[j] for f in found) / len(found) for j in range(3))
+        if margin >= LABEL_MARGIN and fit >= LABEL_FIT:
+            return "label", None
+        other = other or (i == 0 and word_fit <= NO_WORD_FIT)
+    for crop in crops:
+        if fingerprint_hypothesis_margin(crop) is not None:
+            return "loose", crop
+    return ("other", None) if other else (None, None)
+
+
+
 def fingerprint_accepted(found: list[tuple[float, float]] | None) -> bool:
     """
         True if the margins of a line by both networks (fingerprint_margins)
@@ -797,6 +848,12 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
 
     spare_line.margin = hypothesis_margin
 
+    def role(crops):
+        progress.step(2 * WORD_COST)
+        return line_role(crops)
+
+    spare_line.role = role
+
     def attempt(crossed: bool):
         pool = []
 
@@ -804,6 +861,29 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             return detector.find_words(image, step, fingerprint=fingerprint, crossed=crossed)
 
         reading, _, not_found = search(find, gray, progress, on_word, pool, spare_line)
+        if not crossed and (reading is None and not_found.line_count
+                            or reading is not None and getattr(reading.layout, "extra_lines", False)
+                            and reading.fingerprint_crop is None and not getattr(reading, "verified", False)):
+            # a list not found, or numbered with lines without a number: read again without one or two rows at its
+            # start or end that read as a fingerprint or a label (detector.extra_line_sets); one fingerprint check
+            # at most per attempt, as on the other paths (none was made here)
+            extra_pool = []
+
+            def find_extra(image, step, fingerprint):
+                return detector.find_words(image, step, fingerprint=fingerprint, extra=True)
+
+            other, _, _ = search(find_extra, gray, progress, on_word, extra_pool, spare_line)
+            if other is not None:
+                if other.analyze().status == "valid":
+                    guard(other)
+                if other.fingerprint_crop is not None:
+                    other = check_fingerprint(other, extra_pool, progress)
+                if getattr(other, "verified", False) \
+                        or reading is None and not other.layout.fingerprint_hypothesis:
+                    return other, None
+                if reading is not None and other.layout.extra_lines_strong:
+                    # rows read as a fingerprint (strict thresholds) or a label, not verified without them
+                    reading.extra_lines = True
         if reading is None:
             return None, not_found
         if reading.analyze().status == "valid":
@@ -850,10 +930,12 @@ def check_fingerprint(reading: SeedReading, pool: list, progress: Progress) -> S
         (`verified`), or `reading` with every word uncertain; the check is in
         `fingerprint` of the reading returned.
     """
-    crop = reading.fingerprint_crop
-    w, h = crop.size
-    trim = round(FINGERPRINT_TRIM * h)
-    crops = [crop] + ([crop.crop((0, trim, w, h)), crop.crop((0, 0, w, h - trim))] if trim else [])
+    crops = []
+    for crop in [reading.fingerprint_crop] + list(getattr(reading, "fingerprint_others", [])):
+        # two fingerprint lines (with and without a passphrase): the mean of their probabilities also sums to 1
+        w, h = crop.size
+        trim = round(FINGERPRINT_TRIM * h)
+        crops += [crop] + ([crop.crop((0, trim, w, h)), crop.crop((0, 0, w, h - trim))] if trim else [])
     inks = [ink for ink in (normalize_word(c) for c in crops) if ink is not None]
     if not inks:
         return reading
@@ -891,6 +973,7 @@ def check_fingerprint(reading: SeedReading, pool: list, progress: Progress) -> S
     verified = SeedReading(reading.kind, [WordReading(w.image, [(word, 0.0)]) for word, w in zip(seed, words)],
                            reading.min_seed_probability)
     verified.fingerprint_crop = reading.fingerprint_crop
+    verified.fingerprint_others = list(getattr(reading, "fingerprint_others", []))
     verified.fingerprint = check
     verified.verified = True
     verified.numbered = reading.numbered

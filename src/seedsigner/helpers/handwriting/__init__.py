@@ -115,8 +115,7 @@ FINGERPRINT_COST = 0.1
 # * its probability is at least MIN_DETECTOR_SEED_PROBABILITY;
 # * no handwritten word found by the detector with a box score of at least
 #   LEFT_OUT_SCORE and a length of at least LEFT_OUT_LENGTH heights was left
-#   out of the reading (another document, a word crossed out and rewritten),
-#   unless the reading is a whole card and the word is on another card;
+#   out of the reading (another document, a word crossed out and rewritten);
 # * a word whose box is at least STRETCH times longer per letter of the word
 #   read than the median of the page is uncertain: part of it was probably
 #   not read (see stretched_words);
@@ -636,15 +635,11 @@ def stretched_words(reading: SeedReading) -> set[int]:
 def guard(reading: SeedReading):
     """
         Guards of a valid seed (see MIN_DETECTOR_SEED_PROBABILITY): every word
-        becomes uncertain if a handwritten word was left out (on a whole card:
-        a word not on another card); stretched words
+        becomes uncertain if a handwritten word was left out; stretched words
         and words with faint ink left unread become uncertain.
     """
     layout = reading.layout
-    # a whole card misses no word written on another card
-    on_card = layout.kind != "list" and layout.complete
-    if any(score >= LEFT_OUT_SCORE and length >= LEFT_OUT_LENGTH and not (on_card and elsewhere)
-           for score, length, elsewhere in layout.extra_words):
+    if any(score >= LEFT_OUT_SCORE and length >= LEFT_OUT_LENGTH for score, length, _ in layout.extra_words):
         reading.mark_disputed()
         return
     reading.min_seed_probability = max(reading.min_seed_probability, MIN_DETECTOR_SEED_PROBABILITY)

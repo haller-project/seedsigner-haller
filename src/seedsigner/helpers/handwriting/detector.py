@@ -38,6 +38,7 @@
          column may go on beyond it, or a card is cut after its text (or cut
          before it without the first number read being 1).
 """
+import copy
 import ctypes
 import itertools
 import math
@@ -114,6 +115,33 @@ FINGERPRINT_CROPS = (CROP_VARIANTS[0], (0.6, 0.6, 0.5))
 # longer), the longest ones first, at most this many
 FINGERPRINT_MIN_LENGTH = 2.0
 FINGERPRINT_MAX_LINES = 3
+# A word box whose background (OFF_SHEET_PERCENTILE of the gray levels of its crop) is darker than OFF_SHEET times
+# the median background of the words of its document is off the sheet, left out when the count is wrong (real photos
+# of the Pi, 21/11/2026: phantom words on the dark table below the sheet at 0.02 to 0.11, words on paper at 0.79 or more)
+# A word box at least MAX_HEIGHT_SHARE times taller than the median is an object around the sheet, left out when the
+# count is wrong (series of the Pi of 21/11/2026: an object at the top of the frame read as a word 2.5 times taller)
+MAX_HEIGHT_SHARE = 2.0
+OFF_SHEET = 0.4
+OFF_SHEET_PERCENTILE = 90
+OFF_SHEET_CHECK = True
+# Gray levels under the boxes are measured on the photo reduced this many times, on the box widened by STATS_MARGIN
+# heights above and below
+STATS_REDUCE = 4
+STATS_MARGIN = 0.35
+# A word box with a share of dark pixels at least CROSSED_OUT times the median share of the words of the photo may be
+# a word scribbled over (real photo of the Pi, 21/11/2026: 0.66 for the line crossed out, 0.24 to 0.40 for the 15
+# words; but up to 2.7 times the median for short or bold words of other photos): it is left out, with the number
+# written against it, only by a second search made when the first reading is neither verified nor valid (see
+# read_seed in __init__.py)
+CROSSED_OUT = 1.8
+# A word kernel of fewer than SPECK times the median pixels of the kernels of its document is a speck or text seen
+# through the sheet, left out when the count is wrong (same photo: 4 and 7 pixels against a median of 90)
+SPECK = 0.15
+SPECK_CHECK = True
+# a number box ending at most this many heights before the start of a line tried as the fingerprint is taken in
+# with it (its first digit read as a line number), the line alone tried next
+FINGERPRINT_NUMBER_GAP = 0.6
+GLUED_NUMBER = True
 
 # Expected duration on a Pi Zero, in seconds (see Progress in __init__.py): network and decoding, reading of a number
 DETECTOR_COST = 1.8
@@ -431,6 +459,83 @@ def covers(line: Box, point: tuple[float, float], margin: float = 0.2, across: f
     x, y = point
     a, b = x * line.ux + y * line.uy, -x * line.uy + y * line.ux
     return line.a0 - margin * line.h <= a <= line.a1 + margin * line.h and abs(b - line.c) <= across * line.h
+
+
+
+class InkStats:
+    """
+        Gray levels under the word boxes, on the photo reduced STATS_REDUCE
+        times (cheap on a Pi Zero), computed once per box: background
+        (OFF_SHEET_PERCENTILE of its crop), ink (5th percentile) and crop
+        pixels (box with a margin of STATS_MARGIN heights above and below).
+    """
+    def __init__(self, image: Image.Image, det: Detection):
+        self.small = image.reduce(STATS_REDUCE)
+        self.det = det
+        self.cache = {}
+
+
+    def crop(self, box: Box) -> np.ndarray:
+        if id(box) not in self.cache:
+            quad = [(x / STATS_REDUCE, y / STATS_REDUCE)
+                    for x, y in self.det.to_photo(box.quad((0.0, STATS_MARGIN, STATS_MARGIN)))]
+            self.cache[id(box)] = np.asarray(rectified_crop(self.small, quad, 0), dtype=float)
+        return self.cache[id(box)]
+
+
+    def background(self, box: Box) -> float:
+        c = self.crop(box)
+        return float(np.percentile(c, OFF_SHEET_PERCENTILE)) if c.size else 0.0
+
+
+    def ink(self, box: Box) -> float:
+        c = self.crop(box)
+        return float(np.percentile(c, 5)) if c.size else 0.0
+
+
+    def off_sheet(self, boxes: list[Box]) -> set[int]:
+        """
+            Indices of the boxes whose background is darker than OFF_SHEET
+            times the median background of `boxes`: off the sheet.
+        """
+        levels = [self.background(b) for b in boxes]
+        median = float(np.median(levels))
+        return {i for i, v in enumerate(levels) if v < OFF_SHEET * median}
+
+
+    def crossed_out(self, boxes: list[Box]) -> set[int]:
+        """
+            Indices of the boxes whose share of dark pixels (darker than
+            halfway between their background and the median ink of `boxes`)
+            is at least CROSSED_OUT times the median share: a word scribbled
+            over.
+        """
+        if len(boxes) < MIN_GROUP_WORDS:
+            return set()
+        ink = float(np.median([self.ink(b) for b in boxes]))
+        shares = []
+        for b in boxes:
+            c, bg = self.crop(b), self.background(b)
+            shares.append(float((c < bg - 0.5 * (bg - ink)).mean()) if c.size else 0.0)
+        median = float(np.median(shares))
+        return {i for i, v in enumerate(shares) if median > 0 and v >= CROSSED_OUT * median}
+
+
+
+def with_number(line: Box, numbers: list[Box], always: bool = False) -> Box | None:
+    """
+        The line widened to the number boxes centered before its start on its
+        line and ending at most FINGERPRINT_NUMBER_GAP heights before it, or
+        overlapping it (a first digit of a fingerprint taken for a line number), or None
+        if there is none.
+    """
+    before = [n for n in numbers if abs(n.c - line.c) < SAME_LINE * max(line.h, n.h)
+              and n.middle < line.a0 and n.a1 >= line.a0 - FINGERPRINT_NUMBER_GAP * line.h]
+    if not before or not (GLUED_NUMBER or always):
+        return None
+    wide = copy_box(line)
+    wide.a0 = min(n.a0 for n in before)
+    return wide
 
 
 
@@ -966,7 +1071,29 @@ def turned_by_reading(photo: Image.Image, quads: list, fill: int) -> bool:
 
 # ---------- reading ----------
 
-def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordLayout:
+_detections = {}
+
+
+def detections(image: Image.Image, step) -> Detection:
+    """
+        Detection of the document on `image` (see find_words), kept for a
+        second search on the same photo (the last photo only).
+    """
+    key = (id(image), image.size)
+    if key not in _detections:
+        _detections.clear()
+        det = detect(image)
+        step(DETECTOR_COST)
+        region = document_region(det, image.size)
+        if region:
+            det = detect(image, region)
+            step(DETECTOR_COST)
+        _detections[key] = det
+    return _detections[key]
+
+
+
+def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed: bool = False) -> WordLayout:
     """
         Words of the card or list on `image` (upright grayscale photo, full
         resolution) found by the detector (see the steps above).
@@ -978,13 +1105,20 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
         ink but no word box was found). Raises WordsNotFound if no document
         with a valid number of words is found.
     """
-    det = detect(image)
-    step(DETECTOR_COST)
-    region = document_region(det, image.size)
-    if region:
-        det = detect(image, region)
-        step(DETECTOR_COST)
+    det = detections(image, step)
     size = det.maps.shape[2], det.maps.shape[1]
+    stats = InkStats(image, det)
+    if crossed:
+        # second search: the words scribbled over are left out, with the number written against them (a line crossed
+        # out and written again); none: nothing new to read
+        found = [b for b in det.words if b.score > 0]
+        out = stats.crossed_out(found)
+        scribbled = [b for i, b in enumerate(found) if i in out]
+        if not scribbled:
+            raise WordsNotFound("no word crossed out")
+        det = copy.copy(det)
+        det.words = [b for b in det.words if not any(b is c for c in scribbled)]
+        det.numbers = [n for n in det.numbers if not any(with_number(c, [n], True) for c in scribbled)]
     groups, number_groups = {}, {}
     for b in det.words:
         if b.score > 0:
@@ -1001,6 +1135,25 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
     def add_candidate(g, boxes):
         columns = group_lines([copy_box(b) for b in boxes])
         n = sum(len(c) for c in columns)
+        if n not in page.SEED_LENGTHS and OFF_SHEET_CHECK:
+            # boxes on a background much darker than that of the others are off the sheet (the table or the shadow
+            # around it), boxes much taller than the others are objects around the sheet: never words
+            h = float(np.median([b.h for b in boxes]))
+            dark = stats.off_sheet(boxes) | {i for i, b in enumerate(boxes) if b.h >= MAX_HEIGHT_SHARE * h}
+            if dark and len(boxes) - len(dark) >= MIN_GROUP_WORDS:
+                boxes = [b for i, b in enumerate(boxes) if i not in dark]
+                groups[g] = boxes
+                columns = group_lines([copy_box(b) for b in boxes])
+                n = sum(len(c) for c in columns)
+        if n not in page.SEED_LENGTHS and SPECK_CHECK:
+            # word kernels much smaller than the others are specks or text seen through the sheet: never words
+            median = float(np.median([b.pixels for b in boxes]))
+            specks = [b for b in boxes if b.pixels < SPECK * median]
+            if specks and len(boxes) - len(specks) >= MIN_GROUP_WORDS:
+                boxes = [b for b in boxes if b.pixels >= SPECK * median]
+                groups[g] = boxes
+                columns = group_lines([copy_box(b) for b in boxes])
+                n = sum(len(c) for c in columns)
         if n not in page.SEED_LENGTHS:
             # boxes much lower than the others are specks or text seen through the sheet
             h = float(np.median([b.h for b in boxes]))
@@ -1059,7 +1212,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
         if kept and sum(len(c) for c in kept) in page.SEED_LENGTHS:
             columns, count = kept, sum(len(c) for c in kept)
     fill = int(np.median(np.asarray(image.reduce(16))))
-    spare = None
+    spare = spare_first = None
     if g < 0 and anchored is None and count not in page.SEED_LENGTHS and count - 1 in page.SEED_LENGTHS \
             and fingerprint is not None:
         accepted = []
@@ -1067,13 +1220,16 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
             line = columns[c][i]
             # the whole line, then its last word alone (a fingerprint written after a label: "fp: 1a2b3c4d")
             pieces = sorted((b for b in groups[g] if covers(line, b.center)), key=lambda b: b.a0)
-            for box, margins in itertools.product([line] + pieces[-1:] * (len(pieces) > 1), FINGERPRINT_CROPS):
+            wide = with_number(line, number_groups.get(g, []))
+            for box, margins in itertools.product([wide] * (wide is not None) + [line] + pieces[-1:] * (len(pieces) > 1),
+                                                  FINGERPRINT_CROPS):
                 crop = rectified_crop(image, det.to_photo(box.quad(margins)), fill)
                 if fingerprint(crop):
                     accepted.append((c, i, crop))
                     break
         if len(accepted) == 1:
             c, i, spare = accepted[0]
+            spare_first = columns[c][i]
             columns = [[b for j, b in enumerate(column) if (k, j) != (c, i)] for k, column in enumerate(columns)]
             columns = [column for column in columns if column]
             count -= 1
@@ -1082,7 +1238,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
     if count not in page.SEED_LENGTHS:
         raise WordsNotFound(f"{count} lines found", at_edge=at_edge, line_count=count, card=g >= 0 and at_edge)
     lines = [b for c in columns for b in c]
-    spare_line = None
+    spare_line = spare_first if GLUED_NUMBER else None
     if spare is None and fingerprint is not None:
         # a line of the document outside the words (above, below or beside them, numbered or not, with a list
         # counted by its numbers too) is tried as the fingerprint before it is taken for a word left out
@@ -1095,7 +1251,9 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
         accepted = []
         for line in tried:
             pieces = sorted((b for b in left if covers(line, b.center)), key=lambda b: b.a0)
-            for box, margins in itertools.product([line] + pieces[-1:] * (len(pieces) > 1), FINGERPRINT_CROPS):
+            wide = with_number(line, det.numbers)
+            for box, margins in itertools.product([wide] * (wide is not None) + [line] + pieces[-1:] * (len(pieces) > 1),
+                                                  FINGERPRINT_CROPS):
                 crop = rectified_crop(image, det.to_photo(box.quad(margins)), fill)
                 if fingerprint(crop):
                     accepted.append((line, crop))

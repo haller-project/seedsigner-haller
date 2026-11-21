@@ -21,6 +21,8 @@
     probability of at most 1 / (MIN_MATCH_PROBABILITY * 2^32) whatever the
     calibration of the network.
 """
+import math
+
 import numpy as np
 
 from .native import ALPHABET
@@ -37,16 +39,24 @@ PREFIXES = ("", "fp", "xfp", "mfp", "fingerprint")
 # at most 1 / (MIN_MATCH_PROBABILITY * 2^32) = 2.3e-6 per seed checked)
 MIN_MATCH_PROBABILITY = 1e-4
 
+# A digit missed or one too many in the reading of the line (a digit taken
+# for a line number and left out of the crop, two strokes read as two
+# digits): with SHIFTS, the probability of a fingerprint is a mixture of the
+# line read as LENGTH digits and as LENGTH - 1 or LENGTH + 1 digits, each
+# shift with prior SHIFT_PRIOR (see FingerprintReading.probabilities)
+SHIFTS = True
+SHIFT_PRIOR = 0.05
+
 
 
 class Lattice:
     """
         CTC states of a line read as one of `prefixes` (fixed letters)
-        followed by LENGTH hexadecimal digits, for every prefix at once and a
+        followed by `length` hexadecimal digits, for every prefix at once and a
         batch of digit masks; probabilities rescaled at every frame
         (`log_scale`).
     """
-    def __init__(self, prefixes: tuple[str, ...], batch: int):
+    def __init__(self, prefixes: tuple[str, ...], batch: int, length: int = LENGTH):
         count, longest = len(prefixes), max(1, max(len(p) for p in prefixes))
         self.labels = np.zeros((count, longest), int)
         self.valid = np.zeros((count, longest))            # positions holding a letter of the prefix
@@ -67,16 +77,16 @@ class Lattice:
         self.start = np.ones(count)                        # blanks only so far
         self.q_on = np.zeros((count, longest))             # in prefix letter i
         self.q_off = np.zeros((count, longest))            # in a blank after prefix letter i
-        self.h_on = np.zeros((count, batch, LENGTH, 16))   # in digit j, by digit value
-        self.h_off = np.zeros((count, batch, LENGTH, 16))  # in a blank after digit j
+        self.h_on = np.zeros((count, batch, length, 16))   # in digit j, by digit value
+        self.h_off = np.zeros((count, batch, length, 16))  # in a blank after digit j
         self.log_scale = 0.0
 
 
     def step(self, e: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, float]:
         """
             Moves on by one frame of outputs `e` (NUM_CLASSES,) with the digit
-            masks `mask` (batch, LENGTH, 16); returns the mass entering each
-            digit state (batch, LENGTH, 16), summed over the prefixes, and the
+            masks `mask` (batch, length, 16); returns the mass entering each
+            digit state (batch, length, 16), summed over the prefixes, and the
             log scale it is given in.
         """
         blank, digits = e[0], e[HEX_CLASSES]
@@ -117,24 +127,24 @@ class Lattice:
 
 def forward(log_probs: np.ndarray, allowed: np.ndarray, prefixes=PREFIXES) -> np.ndarray:
     """
-        Log-likelihood, for each mask of `allowed` (B, LENGTH, 16) booleans,
-        that the line reads as one of `prefixes` followed by LENGTH
+        Log-likelihood, for each mask of `allowed` (B, length, 16) booleans,
+        that the line reads as one of `prefixes` followed by `length`
         hexadecimal digits, digit j being one allowed by mask[j].
         log_probs: (NUM_CLASSES, frames) network outputs. Returns (B,).
     """
     p = np.exp(log_probs.astype(np.float64))
     mask = allowed.astype(np.float64)
-    lattice = Lattice(prefixes, allowed.shape[0])
+    lattice = Lattice(prefixes, allowed.shape[0], allowed.shape[1])
     for t in range(p.shape[1]):
         lattice.step(p[:, t], mask)
     return lattice.log_total()
 
 
 
-def digit_posteriors(log_probs: np.ndarray, prefixes=PREFIXES) -> tuple[float, np.ndarray]:
+def digit_posteriors(log_probs: np.ndarray, prefixes=PREFIXES, length: int = LENGTH) -> tuple[float, np.ndarray]:
     """
-        Log-likelihood of the line being one of `prefixes` and 8 hexadecimal
-        digits, and (LENGTH, 16) probability of each digit value at each
+        Log-likelihood of the line being one of `prefixes` and `length`
+        hexadecimal digits, and (length, 16) probability of each digit value at each
         position given that reading. Forward pass keeping the mass entering
         each digit state at each frame; backward pass giving the probability
         of completing the string from that state; their product summed over
@@ -143,26 +153,26 @@ def digit_posteriors(log_probs: np.ndarray, prefixes=PREFIXES) -> tuple[float, n
     """
     p = np.exp(log_probs.astype(np.float64))
     frames = p.shape[1]
-    every = np.ones((1, LENGTH, 16))
-    lattice = Lattice(prefixes, 1)
-    entering = np.zeros((frames, LENGTH, 16))
+    every = np.ones((1, length, 16))
+    lattice = Lattice(prefixes, 1, length)
+    entering = np.zeros((frames, length, 16))
     scales = np.zeros(frames)
     for t in range(frames):
         enter, scales[t] = lattice.step(p[:, t], every)
         entering[t] = enter[0]
     log_likelihood = float(lattice.log_total()[0])
     if not np.isfinite(log_likelihood):
-        return -np.inf, np.full((LENGTH, 16), 1 / 16)
+        return -np.inf, np.full((length, 16), 1 / 16)
 
     # backward: b_on[j, c], b_off[j, c] = probability of the rest of the frames from that state
-    b_on, b_off = np.zeros((LENGTH, 16)), np.zeros((LENGTH, 16))
+    b_on, b_off = np.zeros((length, 16)), np.zeros((length, 16))
     b_on[-1] = b_off[-1] = 1.0
     back_scale = 0.0
     posterior = entering[-1] * b_on * np.exp(scales[-1] + back_scale - log_likelihood)
     for t in range(frames - 2, -1, -1):
         e = p[:, t + 1]
         blank, digits = e[0], e[HEX_CLASSES]
-        onward = np.zeros((LENGTH, 16))
+        onward = np.zeros((length, 16))
         onward[:-1] = digits * b_on[1:]   # next frame starts digit j + 1 with value c' (not c without a blank)
         total_onward = onward.sum(1, keepdims=True)
         b_on, b_off = digits * b_on + blank * b_off + total_onward - onward, blank * b_off + total_onward
@@ -197,23 +207,98 @@ class FingerprintReading:
             8 hexadecimal digits (any of them)
         digits: (LENGTH, 16) probability of each digit value at each position
         text: most probable digit at each position
-        probability(fp): probability of the fingerprint `fp` (8 hexadecimal
+        lengths: {length: (log-likelihood, (length, 16) digit probabilities)}
+            of the line read as LENGTH - 1 and LENGTH + 1 digits (a digit
+            missed or one too many, see shifted_probabilities)
+        probabilities(fps): probability of each fingerprint (8 hexadecimal
             digits) given the line, among all strings of 8 digits
     """
-    def __init__(self, log_probs: np.ndarray):
+    def __init__(self, log_probs: np.ndarray, shifts: bool = None):
         self.log_probs = log_probs
         self.log_likelihood, self.digits = digit_posteriors(log_probs)
         self.text = "".join(HEX[i] for i in self.digits.argmax(1))
+        self.shifts = SHIFTS if shifts is None else shifts
+        self.lengths = {}
+        if self.shifts:
+            for n in (LENGTH - 1, LENGTH + 1):
+                self.lengths[n] = digit_posteriors(log_probs, length=n)
 
 
-    def probabilities(self, fingerprints: list[str]) -> list[float]:
+    def exact_probabilities(self, fingerprints: list[str]) -> list[float]:
         """
-            Probability of each fingerprint given the line.
+            Probability of each fingerprint given the line read as exactly
+            LENGTH digits.
         """
         if not fingerprints or not np.isfinite(self.log_likelihood):
             return [0.0] * len(fingerprints)
         scores = forward(self.log_probs, string_masks(fingerprints))
         return [float(np.exp(s - self.log_likelihood)) for s in scores]
+
+
+    def shift_weights(self) -> dict[int, float]:
+        """
+            Weight of each number of digits read (LENGTH, LENGTH - 1, LENGTH +
+            1): its prior (SHIFT_PRIOR for each shift) times the likelihood of
+            the line read with that number of digits, normalized. They depend
+            on the line only, never on the fingerprint checked.
+        """
+        logs = {LENGTH: math.log(1 - 2 * SHIFT_PRIOR) + self.log_likelihood}
+        for n, (log_likelihood, _) in self.lengths.items():
+            logs[n] = math.log(SHIFT_PRIOR) + log_likelihood
+        finite = [v for v in logs.values() if np.isfinite(v)]
+        if not finite:
+            return {n: 0.0 for n in logs}
+        top = max(finite)
+        weights = {n: math.exp(v - top) if np.isfinite(v) else 0.0 for n, v in logs.items()}
+        total = sum(weights.values())
+        return {n: w / total for n, w in weights.items()}
+
+
+    def shifted_probabilities(self, fingerprints: list[str]) -> dict[int, list[float]]:
+        """
+            {LENGTH - 1: P, LENGTH + 1: P}: probability of each fingerprint
+            given the line read with one digit missed (any position, the
+            missed digit any of 16), or with one digit too many (any position,
+            any digit), from the product of the probabilities of the digits at
+            each position of that reading. Each is a distribution over the
+            strings of LENGTH digits (it sums to 1 over them).
+        """
+        out = {}
+        for n, (log_likelihood, digits) in self.lengths.items():
+            values = []
+            for fp in fingerprints:
+                d = [HEX.index(c) for c in fp.lower()]
+                if not np.isfinite(log_likelihood):
+                    values.append(0.0)
+                elif n < LENGTH:
+                    # digit i missed: the line holds fp without it
+                    values.append(sum(np.prod([digits[j, x] for j, x in enumerate(d[:i] + d[i + 1:])])
+                                      for i in range(LENGTH)) / (LENGTH * 16))
+                else:
+                    # a digit too many before position i (any value)
+                    values.append(sum(np.prod([digits[j, x] for j, x in enumerate(d[:i])])
+                                      * np.prod([digits[j + 1, x] for j, x in enumerate(d[i:], i)])
+                                      for i in range(LENGTH + 1)) / (LENGTH + 1))
+            out[n] = values
+        return out
+
+
+    def probabilities(self, fingerprints: list[str]) -> list[float]:
+        """
+            Probability of each fingerprint given the line: read as exactly
+            LENGTH digits, or with SHIFTS as a mixture of that and of the line
+            read with one digit missed or one too many (shift_weights,
+            shifted_probabilities). Each part sums to 1 over the strings of
+            LENGTH digits and the weights do not depend on the string, so the
+            mixture does too: the bound of MIN_MATCH_PROBABILITY holds.
+        """
+        exact = self.exact_probabilities(fingerprints)
+        if not self.shifts:
+            return exact
+        weights = self.shift_weights()
+        shifted = self.shifted_probabilities(fingerprints)
+        return [weights[LENGTH] * p + sum(weights[n] * shifted[n][i] for n in shifted)
+                for i, p in enumerate(exact)]
 
 
 

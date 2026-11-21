@@ -141,7 +141,7 @@ class HandwrittenReadFailedView(View):
             text = _("Move the camera back so all the words fit in the photo.")
         elif self.small:
             status_headline = _("Words too small")
-            text = _("Move the camera closer so the words fill more of the photo.")
+            text = _("Move the camera closer so the words fill more of the photo, with good light and no blur.")
         elif self.line_count:
             status_headline = _("{} words found").format(self.line_count)
             text = _("A seed has 12, 15, 18, 21 or 24 words. Check that none is missing.")

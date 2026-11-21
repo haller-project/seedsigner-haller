@@ -46,6 +46,14 @@ STATUS_RANK = {"invalid": 0, "uncertain": 1, "valid": 2}
 # a higher probability to be declared valid: it reads the photos the first one
 # failed on, where wrong readings that pass the checksum are more frequent.
 LOWERCASE_MODEL_PATH = MODEL_PATH.replace("haller-1-capitals.npz", "haller-1-lowercase.npz")
+
+# Third network, of the same architecture, trained from the first one on
+# synthetic lines of which half are master key fingerprints (8 hexadecimal
+# digits, see fingerprint.py): it reads the fingerprint line that is checked
+# (check_fingerprint), and is loaded the first time one is (1 to 2 seconds on
+# a Pi Zero). The lines that may be a fingerprint are still told apart by the
+# first two networks (FINGERPRINT_MARGIN).
+FINGERPRINT_MODEL_PATH = MODEL_PATH.replace("haller-1-capitals.npz", "haller-1-fingerprint.npz")
 LOWERCASE_MIN_SEED_PROBABILITY = 0.85
 
 # The same photos are also read with a blend of both networks: weighted sum of
@@ -128,6 +136,7 @@ REREAD_COST = 0.4
 
 _engine = []
 _engine_lock = threading.Lock()
+_fingerprint_network = []
 
 
 
@@ -143,6 +152,18 @@ def load_engine():
             from .word_model import WordModel
             _engine.extend((WordModel(), Decoder(), WordModel(LOWERCASE_MODEL_PATH)))
     return _engine
+
+
+
+def fingerprint_network():
+    """
+        The fingerprint network (FINGERPRINT_MODEL_PATH), loaded once.
+    """
+    with _engine_lock:
+        if not _fingerprint_network:
+            from .word_model import WordModel
+            _fingerprint_network.append(WordModel(FINGERPRINT_MODEL_PATH))
+    return _fingerprint_network[0]
 
 
 
@@ -677,7 +698,8 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
 
 def check_fingerprint(reading: SeedReading, pool: list, progress: Progress) -> SeedReading:
     """
-        Checks the fingerprint line of `reading` (see FINGERPRINT_CANDIDATES)
+        Checks the fingerprint line of `reading`, read by the fingerprint
+        network (see FINGERPRINT_CANDIDATES)
         against the candidate seeds of `pool` (see read_layout), most probable
         first. Returns the reading of the matching seed, every word certain
         (`verified`), or `reading` with every word uncertain; the check is in
@@ -686,8 +708,7 @@ def check_fingerprint(reading: SeedReading, pool: list, progress: Progress) -> S
     ink = normalize_word(reading.fingerprint_crop)
     if ink is None:
         return reading
-    first, _, lowercase = load_engine()
-    check = fingerprint.FingerprintCheck([fingerprint.FingerprintReading(n.log_probs(ink)) for n in (first, lowercase)])
+    check = fingerprint.FingerprintCheck([fingerprint.FingerprintReading(fingerprint_network().log_probs(ink))])
     candidates, seen = [], set()
     for _, seed, words in sorted(pool, key=lambda item: item[0]):
         if tuple(seed) not in seen and len(candidates) < FINGERPRINT_CANDIDATES:

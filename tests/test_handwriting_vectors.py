@@ -58,6 +58,7 @@ def load_npz(path: str) -> dict:
 
 def test_vectors_present():
     assert [os.path.basename(p) for p in VECTORS] == ["haller-1-capitals-vectors.json",
+                                                      "haller-1-fingerprint-vectors.json",
                                                       "haller-1-lowercase-vectors.json"]
 
 

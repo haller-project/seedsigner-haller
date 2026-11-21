@@ -265,9 +265,10 @@ back.
 
 ### Check of the fingerprint
 
-When a fingerprint line was left out, it is read again by both networks
-(`fingerprint.FingerprintCheck`: probability of each digit at each position
-by a forward-backward pass over the constrained CTC, mean of both networks)
+When a fingerprint line was left out, it is read again by the fingerprint
+network (`haller-1-fingerprint.npz`, see [The Haller-1 model](#the-haller-1-model);
+`fingerprint.FingerprintCheck`: probability of each digit at each position
+by a forward-backward pass over the constrained CTC)
 and compared with the fingerprints of the candidate seeds of the reading:
 the 16 most probable valid seeds (`FINGERPRINT_CANDIDATES`) of every reading
 of the photo (both orders of two columns, both networks and their blend, the
@@ -507,23 +508,25 @@ the same pages plus the fingerprint line (cards have none), and 600 ordinary
 lists (12 or 24 words, one or two columns), 1 357 of them with a fingerprint.
 Seeds valid and exact / exact / wrong but reported as valid:
 
-| Photos with a fingerprint | Before | Line left out | Line checked |
-|---|---|---|---|
-| All (1 357) | 13 / 67 / 7 | 455 / 582 / 18 | 425 / 596 / 7 |
-| Ordinary lists, capitals (364) | 5 / 24 / 4 | 149 / 180 / 4 | 122 / 180 / 4 |
-| Ordinary lists, lowercase (236) | 3 / 10 / 0 | 38 / 57 / 1 | 37 / 58 / 0 |
-| Red team, capitals (441) | 4 / 22 / 3 | 217 / 264 / 7 | 208 / 270 / 3 |
-| Red team, lowercase (316) | 1 / 11 / 0 | 51 / 81 / 6 | 58 / 88 / 0 |
+| Photos with a fingerprint | Before | Line left out | Checked, word networks | Checked, fingerprint network |
+|---|---|---|---|---|
+| All (1 357) | 13 / 67 / 7 | 455 / 582 / 18 | 425 / 596 / 7 | 559 / 603 / 7 |
+| Ordinary lists, capitals (364) | 5 / 24 / 4 | 149 / 180 / 4 | 122 / 180 / 4 | 160 / 181 / 4 |
+| Ordinary lists, lowercase (236) | 3 / 10 / 0 | 38 / 57 / 1 | 37 / 58 / 0 | 55 / 59 / 0 |
+| Red team, capitals (441) | 4 / 22 / 3 | 217 / 264 / 7 | 208 / 270 / 3 | 262 / 273 / 3 |
+| Red team, lowercase (316) | 1 / 11 / 0 | 51 / 81 / 6 | 58 / 88 / 0 | 82 / 90 / 0 |
 
-Before, the extra line made most lists unreadable (« 13 lines found »). With
-the check, 412 seeds are verified by their fingerprint, all of them right;
+Before, the extra line made most lists unreadable (« 13 lines found »).
+With the check by the fingerprint network (last column, the engine as
+shipped), 546 seeds are verified by their fingerprint, all of them right;
 the wrong valid seeds left are all on photos where the fingerprint line was
 not told apart (kept as a line, merged with a word, or the list then had a
 valid number of lines): wherever a fingerprint was left out and read, no
-wrong seed is reported as valid. The cost: a right seed whose fingerprint is
-misread loses its certain words (30 seeds). The matching seed was the chosen
-one in 92 % of the cases, and never beyond rank 5 among the candidates: 16
-are enough. On the 1 605 photos of the measurement above, the 920 of the red
+wrong seed is reported as valid. A right seed whose fingerprint is misread
+loses its certain words: 17 seeds with the fingerprint network, 144 when the
+line was read by the two word networks (fourth column). The matching seed
+was the chosen one in 91 % of the cases; 16 candidates find all but 3 of the
+matches found among 64 (ranks 34 and 39 on the tuning photos). On the 1 605 photos of the measurement above, the 920 of the red
 team, the 1 167 badly framed ones and the real photos, which carry no
 fingerprint, nothing changes: no line is left out (the thresholds keep a
 margin) and the readings are the same, photo for photo.
@@ -566,11 +569,12 @@ processor time.
 A list with a fingerprint line costs more (measured on a Pi Zero, numpy and
 embit of the device, 21/11/2026): each line that may be a fingerprint is read
 by both networks and decoded (0.2 to 0.35 s per network for the decoding),
-the line left out is read again with the probability of each digit (0.3 to
-0.5 s per network), the fingerprint of the chosen seed is computed (0.071 s:
+the line left out is read again by the fingerprint network, loaded the first
+time (1 to 2 s), with the probability of each digit (0.3 to 0.5 s), the
+fingerprint of the chosen seed is computed (0.071 s:
 PBKDF2 0.062 s, master key 0.005 s, libsecp256k1 of embit) and, when it does
 not match, those of the other candidates (16 at most: 1.1 s, and 0.6 to
-1.1 s per network to compare them with the line). About 2 to 5 s in all; a
+1.1 s to compare them with the line). About 2 to 5 s in all; a
 photo without a fingerprint line takes the same time as before.
 
 ## The Haller-1 model
@@ -584,6 +588,20 @@ described in [How it works](#how-it-works):
 | `haller-1-capitals.npz` | reads every photo; trained mostly on capitals | `2e9275f1acd0d347437e856160430e96a283ec484a48ab96a2ea1ca91531fe14` |
 | `haller-1-lowercase.npz` | second reading; more lowercase and cursive writing | `5d340b354ced032992cb474f03bcc0b063f24ee8e1446d2953203b778652e509` |
 | `haller-1-detector.npz` | word detector, when the rules find no valid seed | `bcda59a220e52979139f44a634a0946dd9d4fe72cd4b246ee23edc6437964aa4` |
+| `haller-1-fingerprint.npz` | reads the fingerprint line that is checked; same architecture as the word networks | `b92cca552dc0a718d309a98b3e5f7ed6f20ee0be32f92aec8df1804d809de454` |
+
+The fingerprint network was trained from the capitals one (Haller commit
+`189c625`, `train --init`) for one epoch on 8 synthetic shards of 50 000
+lines, half of them fingerprints (`generate --hex-share 0.5`: 8 hexadecimal
+digits, sometimes in two groups, after an optional « fp », « xfp »,
+« fingerprint »…, in capitals or lowercase; two shards in cursive fonts), and
+the filtered GNHK words; epoch chosen on 4 000 separate fingerprint lines
+(two more epochs read the words worse and the fingerprints no better). On
+those lines, the probability of the right fingerprint reaches the match
+threshold of 1e-4 for 80 % of them (43 % with the two word networks), 69 %
+in cursive fonts (29 %); the 8 digits are read exactly in 35 % of them (9 %).
+Its reference vectors were written without the comparison with the float
+model, which disagreed on the best word of one strip close to a tie.
 
 They are produced, from scratch and reproducibly, by the separate
 [Haller](https://github.com/haller-project/haller) repository (tag

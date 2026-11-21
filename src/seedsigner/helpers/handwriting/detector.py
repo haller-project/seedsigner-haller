@@ -18,6 +18,8 @@
     Channels 0-6 and 8-10 are logits, channel 7 a value.
 
     Reading (find_words):
+      0. a document covering a small part of the photo is detected again on
+         its region (document_region), at a higher resolution;
       1. documents: each card kernel is a card; a word belongs to the card
          holding its center, other words are free (lists); the document read is
          the one with the most words, and another one of MIN_OTHER_WORDS words
@@ -25,8 +27,9 @@
       2. lines and columns (group_lines), or a tight grid of rows
          (grid_columns); on a document with MIN_ANCHOR_NUMBERS numbers or more,
          one slot per number (anchored_slots);
-      3. orientation: numbers after their words, or the words reading better
-         turned over, mean the page is upside down;
+      3. orientation: numbers after their words mean the page is upside down,
+         numbers before them that it is upright; without numbers, the words
+         reading better turned over;
       4. order: column by column or row by row; when both are possible, the
          numbers are read until one order leads by ORDER_MARGIN, otherwise both
          are given to the analysis, which makes every word uncertain if both
@@ -61,6 +64,8 @@ MIN_CARD_KERNEL = 150         # output pixels of a card kernel component (smalle
 MIN_GROUP_WORDS = 3           # a document with fewer words is a blank card or noise
 ALL = -2                      # document made of every word found, cards and free words together
 MIN_OTHER_WORDS = 6           # words of another document making every word uncertain
+ZOOM_SHARE = 0.4              # documents covering less of the photo are detected again on their region
+ZOOM_MARGIN = 0.15            # margin of that region, share of its size on each side
 
 # Lines and columns, in word box heights
 SAME_LINE = 0.55              # two boxes closer than this across the text direction are on the same line
@@ -334,12 +339,37 @@ class Detection:
 
 
 
-def detect(photo: Image.Image) -> Detection:
+def detect(photo: Image.Image, region: tuple[int, int, int, int] | None = None) -> Detection:
     """
-        Detection on an upright grayscale photo.
+        Detection on an upright grayscale photo, or on the region (left, top,
+        right, bottom, photo pixels) of it.
     """
-    image, s, (ox, oy) = reduce_photo(photo)
-    return Detection(network_maps(image), lambda points: [((2 * u - ox) / s, (2 * v - oy) / s) for u, v in points])
+    x0, y0 = region[:2] if region else (0, 0)
+    image, s, (ox, oy) = reduce_photo(photo.crop(region) if region else photo)
+    return Detection(network_maps(image),
+                     lambda points: [((2 * u - ox) / s + x0, (2 * v - oy) / s + y0) for u, v in points])
+
+
+
+def document_region(det: Detection, size: tuple[int, int]) -> tuple[int, int, int, int] | None:
+    """
+        Region of the photo (photo pixels, `size`) holding the words and cards
+        found, widened by ZOOM_MARGIN of its size on each side, if it covers less
+        than ZOOM_SHARE of the area seen by the network: the words are then
+        found again on it, at a higher resolution. None otherwise.
+    """
+    points = [p for b in det.words if b.score > 0 for p in b.quad()]
+    points += [p for c in det.cards for p in ((c[:, 1].min(), c[:, 0].min()), (c[:, 1].max() + 1, c[:, 0].max() + 1))]
+    if len(points) < 4 * MIN_GROUP_WORDS:
+        return None
+    xs, ys = zip(*det.to_photo(points))
+    x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+    mx, my = ZOOM_MARGIN * (x1 - x0), ZOOM_MARGIN * (y1 - y0)
+    x0, x1 = max(0, int(x0 - mx)), min(size[0], int(x1 + mx) + 1)
+    y0, y1 = max(0, int(y0 - my)), min(size[1], int(y1 + my) + 1)
+    if (x1 - x0) * (y1 - y0) >= ZOOM_SHARE * size[0] * size[1] or x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+    return x0, y0, x1, y1
 
 
 
@@ -871,6 +901,10 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
     """
     det = detect(image)
     step(DETECTOR_COST)
+    region = document_region(det, image.size)
+    if region:
+        det = detect(image, region)
+        step(DETECTOR_COST)
     size = det.maps.shape[2], det.maps.shape[1]
     groups, number_groups = {}, {}
     for b in det.words:
@@ -956,7 +990,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
     linked = anchored["numbers"] if anchored else link_numbers(det, lines, numbers)
     quads = [[det.to_photo(b.quad(m)) for b in lines] for m in CROP_VARIANTS]
     turned = upside_down(lines, list(linked.values()) or numbers)
-    if g >= 0 or (not turned and not numbers_before(lines, list(linked.values()) or numbers)):
+    if not turned and not numbers_before(lines, list(linked.values()) or numbers):
         # no number on either side of the words: reading a few words both ways tells
         turned = turned_by_reading(image, quads[0], fill)
 

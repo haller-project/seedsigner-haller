@@ -140,6 +140,10 @@ RULES_DOUBT = 0.5
 import os  # noqa: E402  (experiment switch, removed before release)
 STRETCH = float(os.environ.get("HW_STRETCH", "2.0"))
 
+# When the rules find no words at all, they cannot contradict the detector:
+# its seed is then valid from DETECTOR_ALONE_MIN_SEED_PROBABILITY.
+DETECTOR_ALONE_MIN_SEED_PROBABILITY = float(os.environ.get("HW_DET_ALONE", "0.99"))
+
 # Expected duration of the steps of a reading, in seconds on a Pi Zero (see
 # Progress): loading of the models, reading of a word by the first network
 # (crop, normalization, network, decoder), by the second network or the blend
@@ -727,8 +731,9 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
                     or first.layout.check(first.order):
                 first.mark_disputed()
             else:
-                if first.min_seed_probability < DETECTOR_MIN_SEED_PROBABILITY:
-                    first.min_seed_probability = DETECTOR_MIN_SEED_PROBABILITY
+                floor = DETECTOR_ALONE_MIN_SEED_PROBABILITY if rules is None else DETECTOR_MIN_SEED_PROBABILITY
+                if first.min_seed_probability < floor:
+                    first.min_seed_probability = floor
                 stretched = stretched_words(first)
                 if stretched:
                     first.doubtful |= stretched

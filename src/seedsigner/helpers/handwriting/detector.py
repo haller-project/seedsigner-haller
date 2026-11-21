@@ -731,7 +731,7 @@ def anchored_slots(det: Detection, words: list[Box], numbers: list[Box]) -> dict
     followings = [starts[ci + 1] if ci + 1 < len(number_columns) else math.inf for ci in range(len(number_columns))]
     taken = {id(b) for ci, column in enumerate(number_columns) for n in column for b in words
              if on_line(b, n, followings[ci], SAME_LINE)}
-    # (nearest first; a number takes several such words only if they are on one line)
+    # words left over are placed nearest first; a number takes several of them only if they are on one line
     pairs = sorted((abs(b.c - n.c), k, id(n), b) for k, b in enumerate(words) if id(b) not in taken
                    for ci, column in enumerate(number_columns) for n in column
                    if on_line(b, n, followings[ci], SLOT_SLACK * SAME_LINE)

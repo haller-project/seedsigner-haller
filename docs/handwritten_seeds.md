@@ -53,9 +53,9 @@ used.
    the checksum analysis is run again.
 5. When the seed was not verified (no fingerprint, a fingerprint that does
    not match, or a word of a verified seed changed by the user), a screen
-   asks to write its fingerprint next to the words, without passphrase, so
+   shows the fingerprint of the words alone, to be written next to them, so
    that the next reading can be verified; when a fingerprint was read and did
-   not match, it is quoted and a passphrase given as a possible cause.
+   not match, it is quoted and every word is to compare with the paper.
 6. The seed then goes to the standard flow (fingerprint, passphrase).
 
 Nothing is written to disk: the photo and the readings only live in memory and
@@ -102,11 +102,11 @@ The engine is `seedsigner.helpers.handwriting`:
 
 | Module | Role |
 |---|---|
-| `page.py` | finds the card (corners, registration on its printed lines, rectification) or the lines and columns of a list (rotation, line profiles, word numbers), and cuts out one crop per word; a line box is widened while ink lies just beyond its sides (a letter set apart from the rest of the word, a faint stroke) |
+| `page.py` | the layout found on a photo (`WordLayout`: crops and outline of each word, reading orders) and the geometry shared by the detector (homography, spare lines of a list) |
 | `preprocess.py` | turns a word crop into an ink map 32 pixels high |
 | `word_model.py` | small convolutional network (about 160 000 parameters, CTC), run in 16-bit integers; two sets of weights, see [The Haller-1 model](#the-haller-1-model) |
 | `decoder.py` | log-likelihood of each of the 2 048 BIP39 words (prefix tree, beam pruning); a line number before the word is accepted; probability of each line number |
-| `detector.py` | word detector of Haller-1: finds the words, the line numbers and the card when the rules of `page.py` give no valid seed, see [Word detector](#word-detector) |
+| `detector.py` | word detector of Haller-1: finds the words, the line numbers and the cards on every photo, groups them into documents, lines and columns, and cuts out one crop per word, see [Word detector](#word-detector) |
 | `checksum.py` | combinations of plausible words, BIP39 checksum, probability of the seed and of each word given the checksum, uncertain words |
 | `native/handwriting.c` | networks, decoder, flood fill and connected components in portable C (no allocation, no CPython), used through `ctypes`; required, see [C library](#c-library) |
 
@@ -188,57 +188,46 @@ seed reported as valid).
 
 ### Word detector
 
-When the rules of `page.py` find no card or list, or a seed that is not
-valid, the photo is searched again by the word detector of Haller-1, and its
-words are read the same way; its reading is kept if its status is better, or
-as good with a more probable seed. The detector is a small fully
-convolutional network (U-Net, 223 000 parameters, same 16-bit integer
-arithmetic as the word network) on the photo reduced to 288 x 384 pixels;
-it outputs maps of the word and line number kernels, of the card area and of
-its four corners, and of the height of the boxes. A card is placed from its
-corners (or those of the rules when both designate the same card, these
-being more precise) and cut along its printed lines as before; a list is cut
-around the detected word boxes, grouped into lines and columns.
+The words are found by the word detector of Haller-1, with no rule about the
+kind of document: a SeedSigner card, another card, a list on any paper. The
+detector is a small fully convolutional network (U-Net, 223 000 parameters,
+same 16-bit integer arithmetic as the word network) on the photo reduced to
+288 x 384 pixels. It outputs maps of the handwritten words and of the line
+numbers (printed or handwritten), of the kernels and the area of the cards,
+of the links from a number to its word, and of the height of the boxes; it
+puts no box on printed text. Then `detector.find_words`:
 
-A second search is a second chance to fall on a wrong seed that passes the
-checksum, and a second reading of words the rules already read. Its seed is
-only declared valid if:
+1. detects again on the region of the document when it covers less than 40 %
+   of the photo (cards and lists far from the camera);
+2. makes documents of the card kernels (a kernel with fewer than 3 words is
+   not a document), and counts the words of a document by its numbers when
+   they are read; a document cut by the frame of the photo comes after a whole
+   one;
+3. groups the words into lines, columns and grids; each word is placed in the
+   slot of its number, and a word written off the line of its number goes to
+   the nearest free slot, after the drift of the words from the lines of their
+   numbers (perspective, height of the writing) is taken out; a word box that
+   spans two numbered lines is shared between them;
+4. tells the direction of reading by the numbers (before or after the words),
+   otherwise reads the words both ways;
+5. takes the order of the words from the numbers read when they tell it,
+   otherwise from the columns and rows; when both orders of two columns pass
+   the checksum, no word is certain;
+6. tells a card cut by the frame of the photo: its area reaches a real edge of
+   the photo beyond its text, and a word or number of the card is seen beyond
+   the text on that side; otherwise the card is whole when the number of its
+   last slot reads as the number of words.
 
-- no reading of the rules (both networks, the blend, both orders) gives
-  another plausible seed;
-- the rules did not read an uncertain seed on a complete layout: their
-  uncertainty is then about the words themselves, which reading them again
-  does not remove (a layout the rules found incomplete, with text left out or
-  a card too small in the photo, or read as an invalid seed, may be read
-  anew);
-- no word read by the rules with a probability of at least 0.9 differs;
-- the detector reading itself is complete: no crop goes out of the photo, the
-  card covers at least 8 % of it, the list does not reach its edge, and at
-  most one detected word lies outside the crops (another card of a sheet, the
-  cut column of a 24-word card, a word written above its line).
-
-Otherwise every word is marked uncertain. When the rules read an uncertain
-seed on a complete layout, the detector is not run at all.
-
-On a blurred photo of a card, the printed lines are spread out and lighter;
-when no card candidate shows half of its lines, they are looked for again
-with a lower contrast (3 gray levels instead of 6), which never turns a list
-of the test photos into a card.
-
-The card is first found by the light area inside its border, then
-registered on its printed lines, so that a wrong edge does not shift the
-words: the lines are looked for on a rectification wider than the card,
-numbered by their regular spacing, and the first one is told by the lines
-that should show where the photo covers the card, by the place the card
-edges give when none of them is the frame of the photo, and by the ends of
-the lines (lines 10 to 12 start further right). The card is thus read in
-place when its header or an edge is out of the photo, when it is seen at an
-angle, turned up to 30 degrees or upside down, small in the photo, partly in
-a shadow or under a finger, or among other cards of a printed sheet; the
-right column of a 24-word card is not taken for a 12-word card. When a word
-line of the card is out of the photo, no word is read: the user is asked to
-move the camera back so that the whole card fits. Lists are straightened up
-to 30 degrees.
+A seed found this way is only valid (level 3 of the gauge at most, see
+[Trust in a reading](#trust-in-a-reading)) if its probability is at least 0.9
+(`MIN_DETECTOR_SEED_PROBABILITY`), no handwritten word detected with a score of
+at least 0.8 and a length of at least one text height is left out of the
+crops (`LEFT_OUT_SCORE`, `LEFT_OUT_LENGTH`), the words are not stretched more
+than 1.7 times their usual spacing (`STRETCH`), and no faint ink left unread by
+the word network lies beyond a word over 1.8 text heights
+(`preprocess.unread_ink`, `UNREAD_INK`). Otherwise every word is marked
+uncertain. These guards were set on simulated tuning pages and on the
+development half of the real photos, never on the test photos.
 
 ### Fingerprint line
 
@@ -246,8 +235,7 @@ Many users write the fingerprint of the master key (8 hexadecimal digits,
 the first 4 bytes of the HASH160 of the BIP32 master public key, as shown by
 wallets and by SeedSigner) under their words, sometimes after « FP: »,
 « xfp » or « fingerprint ». The list then has one line more than a valid
-number of words (13 lines for 12 words). When a list found by the rules, by
-the detector or as two close columns has a number of lines one above a
+number of words (13 lines for 12 words). When a list found by the detector has a number of lines one above a
 valid number of words, the lines that may be such a fingerprint (the first
 line of the list and the last line of each column, a removal that leaves two
 columns of equal length when there are two) are read by both networks
@@ -285,10 +273,10 @@ network (`haller-1-fingerprint.npz`, see [The Haller-1 model](#the-haller-1-mode
 by a forward-backward pass over the constrained CTC)
 and compared with the fingerprints of the candidate seeds of the reading:
 the 16 most probable valid seeds (`FINGERPRINT_CANDIDATES`) of every reading
-of the photo (both orders of two columns, both networks and their blend, the
-rules, the detector, two close columns), in order of rank. The fingerprint
+of the photo (both orders of two columns, both networks and their blend), in
+order of rank. The fingerprint
 of a seed is computed as SeedSigner does (embit: PBKDF2-HMAC-SHA512 with 2048
-rounds, no passphrase, master key, HASH160 of the master public key, first 4
+rounds on the words alone, master key, HASH160 of the master public key, first 4
 bytes).
 
 - A candidate matches if the probability of its fingerprint given the line,
@@ -298,12 +286,11 @@ bytes).
   2^32 values, matches by chance with a probability of at most 2.3e-6 per
   seed checked, whatever the calibration of the networks.
 - The first candidate that matches is the seed written: it is returned with
-  every word certain (`reading.verified`), even when the rules hesitated
+  every word certain (`reading.verified`), even when the reading hesitated
   (order of the columns, twin words, truncated words, a list taken for a
   card). The screen says « Verified » and shows the fingerprint computed.
 - When none matches, the seed is never called wrong: a word or a digit may
-  be misread, or the fingerprint is that of the seed with a passphrase. The
-  words read are kept and every one of them is to check; the screen says
+  be misread. The words read are kept and every one of them is to check; the screen says
   that the fingerprint read does not match these words, and the trust level
   is low (see below).
 
@@ -325,23 +312,23 @@ a wrong seed (a truncated word read as another BIP39 word, for instance).
 | 1, low | anything else: improbable or invalid seed, or a fingerprint read that matches none of the seeds read (evidence against them: 10 to 25 % of such seeds are right on the tuning pages) | none |
 
 The announced shares (`TRUST_RATES`) were chosen on simulated tuning pages
-only (DEV2, SERRE_DEV and lists with a fingerprint, 2 757 pages): the 95 %
-Wilson lower bound of the measured share is 94.7 % for level 3 (667 of 694
-seeds right) and 50.7 % for level 2 (159 of 283). On the test benches and the
-real photos the measured share is at or above the announced one, except on
-the red team with a fingerprint line (adversarial pages: 54 of 61 at level 3,
-16 of 48 at level 2). The gauge is computed once the reading is done and does
+only (DEV2, SERRE_DEV and lists with a fingerprint, 2 757 pages). With the
+detector alone, the 95 % Wilson lower bound of the measured share is 97.6 %
+for level 3 (845 of 858 seeds right) and 66.7 % for level 2 (302 of 426); the
+announced shares stay 90 % and 40 % (a share of 60 % for level 2 would be
+too optimistic on the red team: 79 of 194). On every test bench and on the
+real photos, the measured share is at or above the announced one. The gauge is computed once the reading is done and does
 not change the reading itself.
 
 After a seed is loaded without being verified, SeedSigner shows its
-fingerprint (always without passphrase) to be written next to the words:
+fingerprint, that of the words alone, to be written next to them:
 the next reading of that paper can then be verified.
 
 The fingerprint is not secret; it stays in the reading, as the words do.
 
 `read_seed(image, progress, on_word)` reports its progress after every step
 of the page search and of the reading. Each step is weighted by its expected
-duration on a Pi Zero (constants `*_COST` in `page.py` and `__init__.py`) and
+duration on a Pi Zero (constants `*_COST` in `__init__.py`) and
 moves the progress by its share of the work expected to remain, an estimate
 revised once the card or list is found and when a second reading is needed:
 the bar moves steadily when the estimates are right, and never goes back nor
@@ -477,6 +464,33 @@ vectors.
 
 ## Accuracy
 
+Engine as shipped (word detector alone, fingerprint check, trust gauge),
+measured on 21/11/2026 against the previous engine (rules of `page.py`, the
+detector when they found no valid seed). Seeds verified by their fingerprint
+(wrong ones) / seeds exact (every word right, whatever the trust level) /
+words read correctly:
+
+| Photos | Previous engine | Detector alone |
+|---|---|---|
+| Real photos, development half (38) | 0 (0) / 20 / 361 | 0 (0) / 23 / 443 |
+| Real photos, test half (38) | 0 (0) / 24 / 389 | 0 (0) / 24 / 380 |
+| Seed cards of an evaluation set, photographed (70) | 0 (0) / 0 / 7 | 0 (0) / 10 / 238 |
+| Usual simulated photos (1 560) | 0 (0) / 1 340 / 20 519 | 0 (0) / 1 374 / 20 494 |
+| Badly framed (1 167) | 0 (0) / 616 / 11 534 | 0 (0) / 710 / 12 906 |
+| Red team (845) | 0 (0) / 509 / 8 542 | 0 (0) / 551 / 8 579 |
+| Supports kept apart (900) | 0 (0) / 148 / 4 104 | 0 (0) / 267 / 6 363 |
+| Several columns (240) | 0 (0) / 1 / 63 | 0 (0) / 31 / 769 |
+| Tight columns (200) | 0 (0) / 28 / 578 | 0 (0) / 60 / 1 499 |
+| Lists with a fingerprint line (1 200) | 207 (0) / 700 / 11 545 | 228 (0) / 802 / 12 741 |
+| Red team with a fingerprint line (838) | 307 (0) / 384 / 6 106 | 320 (0) / 434 / 6 349 |
+
+**0 wrong seeds verified in 548 fingerprint checks** (test benches; 173 more
+on the tuning pages, none wrong). Losses of more than 1 % of exact seeds in a
+category: SeedSigner cards of the red team with a fingerprint line (55 to 50)
+and of the red team (48 to 47), real lowercase photos of the development half
+(5 to 4), one real card of another model and one mixed writing of the test
+half (1 to 0 each). The rest of this section records earlier stages.
+
 Measured on 835 photos (800 simulated: cards and free lists, varied hands,
 paper, lighting and framing; 35 real), the engine reads 86 % of the seeds
 exactly and reports 83 % as valid and exact, with no wrong seed reported as
@@ -541,7 +555,7 @@ exact / wrong but reported as valid; words read correctly), before and after:
 The two wrong valid seeds of the badly framed photos are the same before and
 after (a list cut at the bottom, a card in strong perspective). On 920
 photos built to provoke wrong valid seeds (see the threat model), the
-detector adds none (24 before and after, the same photos). Its rules were set
+detector adds none (24 before and after, the same photos). Its guards were set
 on 1 331 other simulated photos, apart from all these.
 
 The fingerprint line and its check were measured on simulated photos that
@@ -595,11 +609,13 @@ The calibrated analysis and the widening of the list crops add, on the same
 photos: nothing on the card, 0.4 s on the lists in capitals, 0.5 to 1.9 s on
 the lowercase and cursive lists (more readings of each word to combine).
 
-A photo read as valid by the rules takes the same time as before: the
-detector only runs when they find no seed, an invalid one, or an incomplete
-layout. It then adds 1.9 s for the network and the reading of the words
-again: on a Pi Zero, badly framed cards that the rules could not read took 5
-to 8 s to be refused and take 13 to 17 s to be read. The line numbers add
+With the detector alone (Pi Zero, 21/11/2026, application stopped, 9 photos
+taken by the device or found online, two runs within 0.7 s of each other):
+1.7 to 11.0 s, median 5.9 s, against 2.1 to 23.2 s, median 4.6 s, for the
+engine made of rules only. A card takes 5.9 to 8.6 s (4.4 to 23.2 s
+before: the detection on the region of the card adds a pass of the
+detector), a list 4.3 to 11.0 s; a list the rules refused is read in 4.3 s.
+The line numbers add
 nothing measurable: they are read from network outputs already computed,
 except for numbers cut off the line.
 
@@ -631,7 +647,7 @@ described in [How it works](#how-it-works):
 |---|---|---|
 | `haller-1-capitals.npz` | reads every photo; trained mostly on capitals | `2e9275f1acd0d347437e856160430e96a283ec484a48ab96a2ea1ca91531fe14` |
 | `haller-1-lowercase.npz` | second reading; more lowercase and cursive writing | `5d340b354ced032992cb474f03bcc0b063f24ee8e1446d2953203b778652e509` |
-| `haller-1-detector.npz` | word detector, when the rules find no valid seed | `bcda59a220e52979139f44a634a0946dd9d4fe72cd4b246ee23edc6437964aa4` |
+| `haller-1-detector.npz` | word, line number and card detector: finds the words on every photo | `8ddddf19ee0088e8dcfe71ba12377167feeb6a626cd6edb17b0bed3b5f69fc5b` |
 | `haller-1-fingerprint.npz` | reads the fingerprint line that is checked; same architecture as the word networks | `b92cca552dc0a718d309a98b3e5f7ed6f20ee0be32f92aec8df1804d809de454` |
 
 The fingerprint network was fine-tuned from the float capitals network
@@ -650,6 +666,20 @@ threshold of 1e-4 for 80 % of them (43 % with the two word networks), 69 %
 in cursive fonts (29 %); the 8 digits are read exactly in 35 % of them (9 %).
 Its reference vectors were written without the comparison with the float
 model, which disagreed on the best word of one strip close to a tie.
+
+The detector was trained for 10 epochs on 136 shards of 1,000 photos and on
+the GNHK windows: 120 shards of simulated pages (lists, sheets, printed seed
+cards drawn from 25 card templates, handwriting from fonts and EMNIST
+letters) and 16 shards of simulated handwriting composed on photos of real
+blank papers and of printed official cards; one more simulated shard was
+used for validation and for the calibration of the quantization. These
+shards were made before the variety audit that the later synthetic data of
+the project pass. The frozen code that made them, the training command, the
+float model, the activation ranges of the quantization and the content
+digests of the shards are in `recipes/haller-1-detector` of the Haller
+repository; the quantization from these ranges and the export give this file
+and its reference vectors byte for byte. The photos of blank supports and of
+cards are listed there by digest, to be published.
 
 They are produced, from scratch and reproducibly, by the separate
 [Haller](https://github.com/haller-project/haller) repository (tag
@@ -690,8 +720,12 @@ Training data of these weights:
   languages (accents removed) as non-target words.
 - Word detector only: simulated photos of cards and lists (the same fonts and
   EMNIST letters, laid out on paper and photographed with framing defects:
-  cut, close, far, turned, in perspective, among other cards, under shadows)
-  and GNHK pages with their word boxes.
+  cut, close, far, turned, in perspective, among other cards, under shadows),
+  printed seed card templates of SeedSigner and of other vendors (sources and
+  licenses listed in `recipes/haller-1-detector/data/card_templates.json` of
+  the Haller repository), photos of blank papers and of printed cards taken
+  for the project with simulated handwriting composed on them, and GNHK pages
+  with their word boxes.
 - Second network only: more synthetic words in lowercase, written as whole
   words in cursive fonts, and BIP39 words written in the hands of GNHK writers
   by Emuru (Pippi et al., "Zero-Shot Styled Text Image Generation, but Make It

@@ -1,7 +1,7 @@
 """
     Master key fingerprint written with the seed: 8 hexadecimal digits, the
-    first 4 bytes of the HASH160 of the BIP32 master public key (no
-    passphrase), as shown by wallets and SeedSigner. Many users write it under
+    first 4 bytes of the HASH160 of the BIP32 master public key of the
+    words alone, as shown by wallets and SeedSigner. Many users write it under
     their words; it is not secret.
 
     Reading: the outputs of the word network on the line (see word_model.py)
@@ -237,8 +237,8 @@ def margins(log_probs: np.ndarray, word_scores: np.ndarray) -> tuple[float, floa
 
 def seed_fingerprint(words: list[str]) -> str:
     """
-        Fingerprint of the BIP32 master key of the seed `words` (BIP39, no
-        passphrase), as 8 hexadecimal digits.
+        Fingerprint of the BIP32 master key of the seed `words` alone (BIP39),
+        as 8 hexadecimal digits.
     """
     from embit import bip32, bip39
     root = bip32.HDKey.from_seed(bip39.mnemonic_to_seed(" ".join(words)))

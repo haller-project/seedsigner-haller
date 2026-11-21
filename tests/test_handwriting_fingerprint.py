@@ -140,33 +140,62 @@ def test_fingerprint_line_left_out_of_a_list():
     fingerprint crop; the 12 words are read. Above the words, the same. (A fingerprint of digits only, as
     04643705, is read less surely by the second network and may be kept as a line.) """
     from embit import bip39
-    from seedsigner.helpers.handwriting import page, read_seed
+    from seedsigner.helpers.handwriting import detector, page, read_seed
     words = bip39.mnemonic_from_bytes(bytes(random.Random(5).getrandbits(8) for _ in range(16))).split()
     fp = fingerprint.seed_fingerprint(words)
     for lines in (words + [fp], [fp] + words):
         photo = rendered_list(lines)
         with pytest.raises(page.WordsNotFound):
-            page.find_words(photo)
+            detector.find_words(photo)
         from seedsigner.helpers.handwriting import is_fingerprint
-        layout = page.find_words(photo, fingerprint=is_fingerprint)
+        layout = detector.find_words(photo, fingerprint=is_fingerprint)
         assert layout.count == 12 and layout.fingerprint is not None and layout.complete
         analysis = read_seed(photo).analyze()
         assert analysis.mnemonic == words and analysis.status == "valid"
 
 
 
+def numbered_list(words: list[str], fp: str, where: str) -> Image.Image:
+    """ Photo of a numbered list printed in capitals, its fingerprint unnumbered above, below or beside it. """
+    font = ImageFont.truetype(FONT_PATH, 46)
+    image = Image.new("L", (1500, 1800), 90)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((120, 100, 1400, 1700), fill=225)
+    top = 300 if where == "above" else 180
+    for i, w in enumerate(words):
+        draw.text((260, top + i * 100), f"{i + 1}. {w.upper()}", fill=35, font=font)
+    x, y = {"above": (260, 180), "below": (260, top + len(words) * 100 + 20), "beside": (900, top + 500)}[where]
+    draw.text((x, y), fp.upper(), fill=35, font=font)
+    return image
+
+
+
+def test_fingerprint_of_a_numbered_list_is_checked():
+    """ A list counted by its numbers: the unnumbered line of its fingerprint, above, below or beside the words,
+    is tried as the fingerprint before being taken for a word left out, and verifies the seed. """
+    from embit import bip39
+    from seedsigner.helpers.handwriting import read_seed
+    words = bip39.mnemonic_from_bytes(bytes(random.Random(5).getrandbits(8) for _ in range(16))).split()
+    for where in ("above", "below", "beside"):
+        reading = read_seed(numbered_list(words, fingerprint.seed_fingerprint(words), where))
+        analysis = reading.analyze()
+        assert reading.verified and reading.fingerprint.status == "verified", where
+        assert analysis.mnemonic == words and not analysis.uncertain, where
+
+
+
 def test_word_line_never_left_out():
     """ A 13th line that is a word stays a word: the list is not a seed. """
     from embit import bip39
-    from seedsigner.helpers.handwriting import is_fingerprint, page
+    from seedsigner.helpers.handwriting import detector, is_fingerprint, page
     words = bip39.mnemonic_from_bytes(bytes(random.Random(8).getrandbits(8) for _ in range(16))).split()
     with pytest.raises(page.WordsNotFound):
-        page.find_words(rendered_list(words + ["decade"]), fingerprint=is_fingerprint)
+        detector.find_words(rendered_list(words + ["decade"]), fingerprint=is_fingerprint)
 
 
 
 def test_fingerprint_of_a_test_vector():
-    """ BIP32 fingerprint of the BIP39 test mnemonic « abandon … about », without passphrase. """
+    """ BIP32 fingerprint of the BIP39 test mnemonic « abandon … about » alone. """
     assert fingerprint.seed_fingerprint(["abandon"] * 11 + ["about"]) == "73c5da0a"
 
 
@@ -186,7 +215,7 @@ def test_fingerprint_verifies_the_seed():
 
 
 def test_fingerprint_of_another_seed_never_makes_it_wrong():
-    """ A fingerprint that matches none of the seeds read (a passphrase, a misread digit) does not call the seed
+    """ A fingerprint that matches none of the seeds read (a misread word or digit) does not call the seed
     wrong: the words read are kept, every one of them to check. """
     from embit import bip39
     from seedsigner.helpers.handwriting import read_seed

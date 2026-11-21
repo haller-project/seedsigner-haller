@@ -209,8 +209,8 @@ class HandwrittenStatusView(View):
             status_color = GUIConstants.WARNING_COLOR
             if fingerprint is not None and fingerprint.status == "mismatch":
                 # TRANSLATOR_NOTE: Inserts the fingerprint as read (e.g. "73c5da0a")
-                what = _("The fingerprint read, {}, does not match these words: a word or a digit may be "
-                         "misread, or it is that of a passphrase.").format(fingerprint.text)
+                what = _("The fingerprint read, {}, does not match these words. "
+                         "The fingerprint must be the one of the words alone.").format(fingerprint.text)
             elif self.review.reading.ambiguous_order:
                 what = _("Your words are in two columns that can be read in two orders. "
                          "Check the order of every word.")
@@ -378,7 +378,7 @@ class HandwrittenWordEntryView(View):
 class HandwrittenFingerprintView(View):
     """
     Shown when the seed loaded was not verified by a fingerprint written with its words:
-    asks to write its fingerprint, without passphrase, next to the words, so that the
+    shows the fingerprint of the words alone, to be written next to them, so that the
     next reading can be verified.
     """
     NEXT = ButtonOption("Next")
@@ -389,16 +389,16 @@ class HandwrittenFingerprintView(View):
 
 
     def run(self):
-        # Fingerprint of the words alone, whatever passphrase is added afterwards
+        # Fingerprint of the words alone
         pending_seed = self.controller.storage.get_pending_seed()
         seed_fingerprint = Seed(pending_seed.mnemonic_list, wordlist_language_code=pending_seed.wordlist_language_code).get_fingerprint()
         fingerprint = getattr(self.review.reading, "fingerprint", None)
         if fingerprint is not None and fingerprint.status == "mismatch":
             # TRANSLATOR_NOTE: Inserts the fingerprint as read on the paper (e.g. "73c5da0a")
-            text = _("Yours, {}, did not match: it may include a passphrase. Write this one, without "
-                     "passphrase.").format(fingerprint.text)
+            text = _("Yours, {}, did not match these words. Write this one next to your words: it is the "
+                     "fingerprint of the words alone.").format(fingerprint.text)
         else:
-            text = _("Write this fingerprint next to your words, without passphrase: next time, it will verify them.")
+            text = _("Write this fingerprint next to your words: next time, it will verify them.")
 
         selected_menu_num = self.run_screen(
             LargeIconStatusScreen,

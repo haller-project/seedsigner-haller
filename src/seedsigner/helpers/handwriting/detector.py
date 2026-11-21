@@ -278,9 +278,10 @@ class Detection:
         (pixels of each card kernel component), card area. `to_photo(points)`
         maps output pixels to photo pixels.
     """
-    def __init__(self, maps: np.ndarray, to_photo):
+    def __init__(self, maps: np.ndarray, to_photo, frame=((0, -1), (0, 1), (-1, 0), (1, 0))):
         self.maps = maps
         self.to_photo = to_photo
+        self.frame = frame
         words, numbers = sigmoid(maps[WORD]), sigmoid(maps[NUMBER])
         word_kernels = [p for p in components(maps[WORD] > 0) if len(p) >= MIN_KERNEL_PIXELS]
         number_kernels = [p for p in components(maps[NUMBER] > 0) if len(p) >= MIN_KERNEL_PIXELS]
@@ -315,14 +316,20 @@ class Detection:
 
     def cut_sides(self, card: int) -> list[tuple[int, int]]:
         """
-            Outward normals (x, y) of the sides of the frame touched by the
-            kernel of `card`.
+            Outward normals (x, y) of the sides of the photo (`frame`) touched
+            by `card`: by its kernel, or by the card area holding it and no
+            other card kernel.
         """
         p = self.cards[card]
+        y, x = p[:, 0], p[:, 1]
+        for area in components(self.card_area):
+            held = set(np.unique(self.labels[area[:, 0], area[:, 1]]).tolist()) - {0}
+            if held == {card + 1}:
+                y, x = np.concatenate([y, area[:, 0]]), np.concatenate([x, area[:, 1]])
+                break
         h, w = self.labels.shape
-        sides = (((0, -1), p[:, 0].min() <= 0), ((0, 1), p[:, 0].max() >= h - 1),
-                 ((-1, 0), p[:, 1].min() <= 0), ((1, 0), p[:, 1].max() >= w - 1))
-        return [n for n, hit in sides if hit]
+        sides = (((0, -1), y.min() <= 0), ((0, 1), y.max() >= h - 1), ((-1, 0), x.min() <= 0), ((1, 0), x.max() >= w - 1))
+        return [n for n, hit in sides if hit and n in self.frame]
 
 
     def link_score(self, a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -341,10 +348,13 @@ def detect(photo: Image.Image, region: tuple[int, int, int, int] | None = None) 
         Detection on an upright grayscale photo, or on the region (left, top,
         right, bottom, photo pixels) of it.
     """
-    x0, y0 = region[:2] if region else (0, 0)
+    x0, y0, x1, y1 = region or (0, 0, photo.width, photo.height)
     image, s, (ox, oy) = reduce_photo(photo.crop(region) if region else photo)
+    # sides of the region that are sides of the photo
+    frame = tuple(n for n, on in (((0, -1), y0 <= 0), ((0, 1), y1 >= photo.height), ((-1, 0), x0 <= 0),
+                                  ((1, 0), x1 >= photo.width)) if on)
     return Detection(network_maps(image),
-                     lambda points: [((2 * u - ox) / s + x0, (2 * v - oy) / s + y0) for u, v in points])
+                     lambda points: [((2 * u - ox) / s + x0, (2 * v - oy) / s + y0) for u, v in points], frame)
 
 
 

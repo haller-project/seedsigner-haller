@@ -736,14 +736,16 @@ def anchored_slots(det: Detection, words: list[Box], numbers: list[Box]) -> dict
     followings = [starts[ci + 1] if ci + 1 < len(number_columns) else math.inf for ci in range(len(number_columns))]
     taken = {id(b) for ci, column in enumerate(number_columns) for n in column for b in words
              if on_line(b, n, followings[ci], SAME_LINE)}
-    extra = {}
-    for b in words:
-        if id(b) not in taken:
-            near = [(abs(b.c - n.c), id(n)) for ci, column in enumerate(number_columns) for n in column
-                    if on_line(b, n, followings[ci], SLOT_SLACK * SAME_LINE)
-                    and not any(on_line(w, n, followings[ci], SAME_LINE) for w in words)]
-            if near:
-                extra.setdefault(min(near)[1], []).append(b)
+    # (nearest first; a number takes several such words only if they are on one line)
+    pairs = sorted((abs(b.c - n.c), k, id(n), b) for k, b in enumerate(words) if id(b) not in taken
+                   for ci, column in enumerate(number_columns) for n in column
+                   if on_line(b, n, followings[ci], SLOT_SLACK * SAME_LINE)
+                   and not any(on_line(w, n, followings[ci], SAME_LINE) for w in words))
+    extra, placed = {}, set()
+    for _, k, n_id, b in pairs:
+        if k not in placed and all(abs(w.c - b.c) < SAME_LINE * max(w.h, b.h) for w in extra.get(n_id, [])):
+            extra.setdefault(n_id, []).append(b)
+            placed.add(k)
     # a word box on the lines of several numbers holds the words of all of them (words touching across lines): each
     # number takes the part of it on its own line, of the height of the words on one line
     found_of = {id(n): [b for b in words if on_line(b, n, followings[ci], SAME_LINE)] or extra.get(id(n), [])

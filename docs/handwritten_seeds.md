@@ -53,9 +53,9 @@ used.
    the checksum analysis is run again.
 5. When the seed was not verified (no fingerprint, a fingerprint that does
    not match, or a word of a verified seed changed by the user), a screen
-   asks to write its fingerprint next to the words, without passphrase, so
+   shows the fingerprint of the words alone, to be written next to them, so
    that the next reading can be verified; when a fingerprint was read and did
-   not match, it is quoted and a passphrase given as a possible cause.
+   not match, it is quoted and every word is to compare with the paper.
 6. The seed then goes to the standard flow (fingerprint, passphrase).
 
 Nothing is written to disk: the photo and the readings only live in memory and
@@ -288,7 +288,7 @@ the 16 most probable valid seeds (`FINGERPRINT_CANDIDATES`) of every reading
 of the photo (both orders of two columns, both networks and their blend, the
 rules, the detector, two close columns), in order of rank. The fingerprint
 of a seed is computed as SeedSigner does (embit: PBKDF2-HMAC-SHA512 with 2048
-rounds, no passphrase, master key, HASH160 of the master public key, first 4
+rounds on the words alone, master key, HASH160 of the master public key, first 4
 bytes).
 
 - A candidate matches if the probability of its fingerprint given the line,
@@ -302,8 +302,7 @@ bytes).
   (order of the columns, twin words, truncated words, a list taken for a
   card). The screen says « Verified » and shows the fingerprint computed.
 - When none matches, the seed is never called wrong: a word or a digit may
-  be misread, or the fingerprint is that of the seed with a passphrase. The
-  words read are kept and every one of them is to check; the screen says
+  be misread. The words read are kept and every one of them is to check; the screen says
   that the fingerprint read does not match these words, and the trust level
   is low (see below).
 
@@ -334,7 +333,7 @@ the red team with a fingerprint line (adversarial pages: 54 of 61 at level 3,
 not change the reading itself.
 
 After a seed is loaded without being verified, SeedSigner shows its
-fingerprint (always without passphrase) to be written next to the words:
+fingerprint, that of the words alone, to be written next to them:
 the next reading of that paper can then be verified.
 
 The fingerprint is not secret; it stays in the reading, as the words do.
@@ -631,7 +630,7 @@ described in [How it works](#how-it-works):
 |---|---|---|
 | `haller-1-capitals.npz` | reads every photo; trained mostly on capitals | `2e9275f1acd0d347437e856160430e96a283ec484a48ab96a2ea1ca91531fe14` |
 | `haller-1-lowercase.npz` | second reading; more lowercase and cursive writing | `5d340b354ced032992cb474f03bcc0b063f24ee8e1446d2953203b778652e509` |
-| `haller-1-detector.npz` | word detector, when the rules find no valid seed | `bcda59a220e52979139f44a634a0946dd9d4fe72cd4b246ee23edc6437964aa4` |
+| `haller-1-detector.npz` | word, line number and card detector: finds the words on every photo | `8ddddf19ee0088e8dcfe71ba12377167feeb6a626cd6edb17b0bed3b5f69fc5b` |
 | `haller-1-fingerprint.npz` | reads the fingerprint line that is checked; same architecture as the word networks | `b92cca552dc0a718d309a98b3e5f7ed6f20ee0be32f92aec8df1804d809de454` |
 
 The fingerprint network was trained from the capitals one (Haller commit

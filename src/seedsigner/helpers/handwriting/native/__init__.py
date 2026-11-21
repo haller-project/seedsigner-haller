@@ -45,7 +45,7 @@ class Network(ctypes.Structure):
 # Layers of the word detector, in the order of handwriting.h
 DETECTOR_LAYERS = ("e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "d4", "d3", "d2", "d1")
 DETECTOR_SIZE = (288, 384)  # width, height of the input
-DETECTOR_OUTPUTS = 8
+DETECTOR_OUTPUTS = 11
 
 
 

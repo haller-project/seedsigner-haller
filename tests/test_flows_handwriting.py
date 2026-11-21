@@ -188,7 +188,8 @@ class TestHandwritingFlows(FlowTest):
     def test_fingerprint_mismatch_flow(self):
         """
         A fingerprint that matches none of the seeds read: the notice and the fingerprint
-        screen both give the passphrase as a possible cause.
+        screen both quote it, the fingerprint screen shows that of the words alone, and
+        neither gives a cause.
         """
         reading = StubReading(VALID_MNEMONIC, uncertain={k: ["ability"] for k in range(12)})
         reading.fingerprint = MagicMock(status="mismatch", text="0badf00d")
@@ -229,12 +230,13 @@ class TestHandwritingFlows(FlowTest):
             FlowStep(seed_views.SeedFinalizeView),
         ])
 
-        assert "passphrase" in screens[0]["paragraphs"][0][1] and "0badf00d" in screens[0]["paragraphs"][0][1]
+        assert "0badf00d" in screens[0]["paragraphs"][0][1] and "words alone" in screens[0]["paragraphs"][0][1]
+        assert "Compare every word" in screens[0]["paragraphs"][1][1]
         assert screens[0]["gauge"][0] == TRUST_MEDIUM
         fingerprint = self.controller.storage.get_pending_seed().get_fingerprint()
         assert screens[1]["status_headline"] == fingerprint
-        assert "without passphrase" in screens[1]["text"] and "0badf00d" in screens[1]["text"]
-        assert "passphrase" in screens[1]["text"]
+        assert "0badf00d" in screens[1]["text"] and "words alone" in screens[1]["text"]
+        assert all("passphrase" not in str(s) for s in screens)
 
 
     def test_seed_select_flow_entry(self):

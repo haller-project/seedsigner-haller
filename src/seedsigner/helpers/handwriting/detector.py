@@ -39,6 +39,7 @@
          before it without the first number read being 1).
 """
 import ctypes
+import itertools
 import math
 import os
 
@@ -111,6 +112,8 @@ ERASE_TILTED_LINES = True
 
 # Word crops around the box, in box heights (horizontal, top, bottom): first reading, taller band, wider band
 CROP_VARIANTS = ((0.6, 0.85, 0.75), (0.6, 1.1, 1.0), (1.2, 0.8, 0.7))
+# Crops of a line given to the fingerprint judge, first one accepted: first reading, lower band
+FINGERPRINT_CROPS = (CROP_VARIANTS[0], (0.6, 0.6, 0.5))
 
 # Expected duration on a Pi Zero, in seconds (see Progress in __init__.py): network and decoding, reading of a number
 DETECTOR_COST = 1.8
@@ -1062,9 +1065,14 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
             and fingerprint is not None:
         accepted = []
         for c, i in page.spare_lines(columns):
-            crop = rectified_crop(image, det.to_photo(columns[c][i].quad(CROP_VARIANTS[0])), fill)
-            if fingerprint(crop):
-                accepted.append((c, i, crop))
+            line = columns[c][i]
+            # the whole line, then its last word alone (a fingerprint written after a label: "fp: 1a2b3c4d")
+            pieces = sorted((b for b in groups[g] if covers(line, b.center)), key=lambda b: b.a0)
+            for box, margins in itertools.product([line] + pieces[-1:] * (len(pieces) > 1), FINGERPRINT_CROPS):
+                crop = rectified_crop(image, det.to_photo(box.quad(margins)), fill)
+                if fingerprint(crop):
+                    accepted.append((c, i, crop))
+                    break
         if len(accepted) == 1:
             c, i, spare = accepted[0]
             columns = [[b for j, b in enumerate(column) if (k, j) != (c, i)] for k, column in enumerate(columns)]

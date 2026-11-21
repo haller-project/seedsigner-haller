@@ -64,6 +64,7 @@ MIN_CARD_KERNEL = 150         # output pixels of a card kernel component (smalle
 MIN_GROUP_WORDS = 3           # a document with fewer words is a blank card or noise
 ALL = -2                      # document made of every word found, cards and free words together
 MIN_OTHER_WORDS = 6           # words of another document making every word uncertain
+BEYOND_TEXT = 0.3             # writing of a card farther than this many word heights beyond its text: card cut there
 ZOOM_SHARE = 0.4              # documents covering less of the photo are detected again on their region
 ZOOM_MARGIN = 0.15            # margin of that region, share of its size on each side
 
@@ -358,6 +359,19 @@ def detect(photo: Image.Image, region: tuple[int, int, int, int] | None = None) 
     frame = {n: at for n, (on, at) in sides.items() if on}
     return Detection(network_maps(image),
                      lambda points: [((2 * u - ox) / s + x0, (2 * v - oy) / s + y0) for u, v in points], frame)
+
+
+
+def on_card(det: Detection, point: tuple[float, float], card: int) -> bool:
+    """
+        True if the point (output pixels) lies on `card`: on its kernel or on
+        the card area around it.
+    """
+    if det.card_of(point) == card:
+        return True
+    x, y = int(point[0]), int(point[1])
+    h, w = det.card_area.shape
+    return 0 <= y < h and 0 <= x < w and bool(det.card_area[y, x]) and det.card_of(point) in (card, -1)
 
 
 
@@ -1041,14 +1055,23 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
         # no number on either side of the words: reading a few words both ways tells
         turned = turned_by_reading(image, quads[0], fill)
 
-    first_number_needed = False
+    first_number_needed = last_number_needed = False
     if g >= 0 and det.cut_sides(g):
-        # card cut after its text or below it: words may be missing; cut before or above it: the first number
-        # must be 1
+        # card reaching the frame after its text or below it: cut if writing of the card is seen beyond its text on
+        # that side, otherwise whole only if the number of its last word is its count; before or above it: the
+        # first number must be 1
         ux, uy = (-lines[0].ux, -lines[0].uy) if turned else (lines[0].ux, lines[0].uy)
+        h = float(np.median([b.h for b in lines]))
         for nx, ny in det.cut_sides(g):
             if nx * ux + ny * uy > 0.5 or -nx * uy + ny * ux > 0.5:
-                at_edge = True
+                end = max(x * nx + y * ny for b in lines for x, y in b.quad())
+                beyond = [b for b in det.words + det.numbers if (b in det.numbers or b.score > 0)
+                          and b.center[0] * nx + b.center[1] * ny > end + BEYOND_TEXT * h
+                          and on_card(det, b.center, g)]
+                if beyond:
+                    at_edge = True
+                else:
+                    last_number_needed = True
             else:
                 first_number_needed = True
     orders = anchored["orders"] if anchored else candidate_orders(columns)
@@ -1081,6 +1104,11 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
             if decided:
                 orders = decided
                 break
+
+    if last_number_needed and not at_edge:
+        last = orders[0][-1] if len(orders) == 1 else None
+        p = number(last) if last in linked else None
+        at_edge = p is None or len(p) < count or p[count - 1] < 0.5
 
     def crop(k, variant):
         c = rectified_crop(image, quads[variant][k], fill)

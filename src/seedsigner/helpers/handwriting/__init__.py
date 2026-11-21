@@ -133,6 +133,13 @@ FINGERPRINT_COST = 0.1
 DETECTOR_MIN_SEED_PROBABILITY = 0.99
 RULES_DOUBT = 0.5
 
+# A word of a valid detector seed whose box is at least STRETCH times longer
+# per letter of the word read than the median of the page is uncertain: part
+# of it was probably not read (faded or broken letters, see stretched_words).
+# Chosen on simulated pages kept apart from the tests.
+import os  # noqa: E402  (experiment switch, removed before release)
+STRETCH = float(os.environ.get("HW_STRETCH", "1.5"))
+
 # Expected duration of the steps of a reading, in seconds on a Pi Zero (see
 # Progress): loading of the models, reading of a word by the first network
 # (crop, normalization, network, decoder), by the second network or the blend
@@ -663,6 +670,22 @@ def search(find, gray: Image.Image, progress: Progress, on_word, pool: list, fin
 
 
 
+def stretched_words(reading: SeedReading) -> set[int]:
+    """
+        Positions of the words whose box is at least STRETCH times longer per
+        letter of the word read than the median of the page (detector
+        layouts): part of the word was probably not read (faded or broken
+        letters).
+    """
+    lengths = getattr(reading.layout, "lengths", None)
+    if lengths is None:
+        return set()
+    per_letter = [lengths[k] / len(w.candidates[0][0]) for k, w in zip(reading.order, reading.words)]
+    median = float(np.median(per_letter))
+    return {i for i, x in enumerate(per_letter) if x >= STRETCH * median}
+
+
+
 def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
     """
         Reads the seed written on `image` (upright photo, full resolution).
@@ -703,8 +726,12 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             if not agrees(first, rules, plausible) or not confirms(rules, first.analyze().mnemonic) \
                     or first.layout.check(first.order):
                 first.mark_disputed()
-            elif first.min_seed_probability < DETECTOR_MIN_SEED_PROBABILITY:
-                first.min_seed_probability = DETECTOR_MIN_SEED_PROBABILITY
+            else:
+                if first.min_seed_probability < DETECTOR_MIN_SEED_PROBABILITY:
+                    first.min_seed_probability = DETECTOR_MIN_SEED_PROBABILITY
+                stretched = stretched_words(first)
+                if stretched:
+                    first.doubtful |= stretched
                 first._last = None
         if first is not None:
             a, b = first.analyze(), rules.analyze() if rules is not None else None

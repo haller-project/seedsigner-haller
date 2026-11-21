@@ -666,6 +666,7 @@ def anchored_slots(det: Detection, words: list[Box], numbers: list[Box]) -> dict
                 box = copy_box(found[0])
                 for b in found[1:]:
                     box.merge(copy_box(b))
+                box.ink = box.a1 - box.a0  # length of the writing found, before the slot is widened
                 box.a0 = min(box.a0, n.a1 + NUMBER_WORD_GAP * n.h)  # a missed first piece is taken in
                 filled = True
             else:
@@ -968,6 +969,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
                         complete=not (at_edge or ambiguous))
     layout.doubtful = anchored["synthetic"] if anchored else set()
     layout.fingerprint = spare
+    layout.lengths = [getattr(b, "ink", b.a1 - b.a0) / b.h for b in lines]
 
     def check(order: list[int]) -> bool:
         """

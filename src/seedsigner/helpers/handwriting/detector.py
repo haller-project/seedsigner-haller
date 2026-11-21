@@ -49,7 +49,7 @@ from PIL import Image, ImageDraw
 from . import native
 from . import page
 from .page import WordLayout, WordsNotFound
-from .preprocess import erase_lines, normalize_word
+from .preprocess import normalize_word
 
 DETECTOR_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "resources", "handwriting",
                              "haller-1-detector.npz")
@@ -89,7 +89,6 @@ MIN_COLUMN_LINES = 3          # a column of fewer lines mostly on the frame is t
 MIN_ANCHOR_NUMBERS = 6        # numbers of a document above which its slots are anchored on them
 WRITTEN = 0.5                 # word probability in an empty slot above which it holds a missed word
 SLOT_LENGTH = 8.0             # length of a slot with no word found, in number heights
-FIT_DRIFT = True              # words matched to the lines of their numbers with the drift of the page taken out
 MIN_DRIFT_WORDS = 6           # words on the lines of their numbers needed to fit that drift
 MAX_DRIFT = 0.2               # largest slope of the lines from the text direction
 SLOT_SLACK = 1.8              # a word off every number line goes to a free slot this many times SAME_LINE away
@@ -106,9 +105,6 @@ ORDER_MARGIN = math.log(1e4)  # log-likelihood lead of the best order over the o
 # turned readings lead by ORIENTATION_MARGIN (summed log-likelihoods per unit of width)
 ORIENTATION_WORDS = 3
 ORIENTATION_MARGIN = 1.0
-
-# Printed lines of a card crossing a word crop at a slant are erased from it (preprocess.erase_lines)
-ERASE_TILTED_LINES = True
 
 # Word crops around the box, in box heights (horizontal, top, bottom): first reading, taller band, wider band
 CROP_VARIANTS = ((0.6, 0.85, 0.75), (0.6, 1.1, 1.0), (1.2, 0.8, 0.7))
@@ -742,25 +738,24 @@ def anchored_slots(det: Detection, words: list[Box], numbers: list[Box]) -> dict
         return gap(b, n) < tolerance * max(b.h, n.h) and b.a1 > n.a1 and b.middle < following - 0.3 * n.h
 
     followings = [starts[ci + 1] if ci + 1 < len(number_columns) else math.inf for ci in range(len(number_columns))]
-    if FIT_DRIFT:
-        # drift of the words from the lines of their numbers: slope of the lines on the photo (perspective) and
-        # height of the writing above them, fitted on the words nearest to a number on its line
-        nearest = {}
-        for ci, column in enumerate(number_columns):
-            for n in column:
-                for k, b in enumerate(words):
-                    if on_line(b, n, followings[ci], SAME_LINE) and gap(b, n) < nearest.get(k, (math.inf,))[0]:
-                        nearest[k] = (gap(b, n), b.middle - n.middle, b.c - n.c, max(b.h, n.h))
-        if len(nearest) >= MIN_DRIFT_WORDS:
-            x, y, h = (np.array(v) for v in zip(*[(a, c, hh) for _, a, c, hh in nearest.values()]))
-            keep = np.ones(len(x), bool)
-            for _ in range(2):
-                slope, offset = np.polyfit(x[keep], y[keep], 1) if np.ptp(x[keep]) > 0 else (0.0, float(np.median(y)))
-                keep = np.abs(y - slope * x - offset) < 0.5 * SAME_LINE * h
-                if keep.sum() < MIN_DRIFT_WORDS:
-                    break
-            drift[:] = float(np.clip(slope, -MAX_DRIFT, MAX_DRIFT)), float(np.clip(offset, -SAME_LINE * np.median(h),
-                                                                                       SAME_LINE * np.median(h)))
+    # drift of the words from the lines of their numbers: slope of the lines on the photo (perspective) and
+    # height of the writing above them, fitted on the words nearest to a number on its line
+    nearest = {}
+    for ci, column in enumerate(number_columns):
+        for n in column:
+            for k, b in enumerate(words):
+                if on_line(b, n, followings[ci], SAME_LINE) and gap(b, n) < nearest.get(k, (math.inf,))[0]:
+                    nearest[k] = (gap(b, n), b.middle - n.middle, b.c - n.c, max(b.h, n.h))
+    if len(nearest) >= MIN_DRIFT_WORDS:
+        x, y, h = (np.array(v) for v in zip(*[(a, c, hh) for _, a, c, hh in nearest.values()]))
+        keep = np.ones(len(x), bool)
+        for _ in range(2):
+            slope, offset = np.polyfit(x[keep], y[keep], 1) if np.ptp(x[keep]) > 0 else (0.0, float(np.median(y)))
+            keep = np.abs(y - slope * x - offset) < 0.5 * SAME_LINE * h
+            if keep.sum() < MIN_DRIFT_WORDS:
+                break
+        limit = SAME_LINE * float(np.median(h))
+        drift[:] = float(np.clip(slope, -MAX_DRIFT, MAX_DRIFT)), float(np.clip(offset, -limit, limit))
     # words on the line of their number; a word left over goes to the nearest number with no word on its line
     # within SLOT_SLACK times that distance (words written above or below the printed line)
     taken = {id(b) for ci, column in enumerate(number_columns) for n in column for b in words
@@ -1149,8 +1144,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
         at_edge = p is None or len(p) < count or p[count - 1] < 0.5
 
     def crop(k, variant):
-        c = rectified_crop(image, quads[variant][k], fill)
-        return erase_lines(c) if g >= 0 and ERASE_TILTED_LINES else c
+        return rectified_crop(image, quads[variant][k], fill)
 
     kind = "list" if g < 0 else ("card24" if count > 12 else "card12")
     layout = WordLayout(kind, count, orders, len(CROP_VARIANTS), crop, lambda k: quads[0][k],

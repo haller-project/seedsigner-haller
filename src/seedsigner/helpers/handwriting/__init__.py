@@ -109,22 +109,19 @@ FINGERPRINT_FIT = -21.0
 # fingerprint at a margin of 19 and a fit of -22.6 by the word networks, 27.7 and +0.6 by the fingerprint network;
 # the word lines of the same photos at -20 or below for all three). The fingerprint network is loaded only then.
 FINGERPRINT_RESCUE_MARGIN = 12.0
-EXPERT_JUDGE = True
-
-# A reading neither verified nor valid is tried again without the words that may be scribbled over (see
-# detector.CROSSED_OUT); the second one is kept if it is verified, or else has a better status, or else a more
-# probable seed
-CROSSED_CHECK = True
 
 # The fingerprint line is checked against the FINGERPRINT_CANDIDATES most
 # probable valid seeds of the readings (every reading order, network and
 # layout), in order of rank: the first one whose fingerprint matches (see
 # fingerprint.MIN_MATCH_PROBABILITY) is the seed written, every word certain.
 # When none matches, the seed is never called wrong (a word or a digit may be
-# misread): every word is uncertain. FINGERPRINT_COST: computation of one fingerprint on a Pi
+# misread): every word is uncertain. With 3 candidates and the threshold of
+# fingerprint.py, a wrong seed is verified by chance with a probability of at
+# most 1e-6 per photo (the right seed was among the first 3 on all but 6 of
+# 1 698 pages with a fingerprint read, 21/11/2026). FINGERPRINT_COST: computation of one fingerprint on a Pi
 # Zero (PBKDF2-HMAC-SHA512, 2048 rounds, 0.062 s; master key and HASH160,
 # 0.005 s; measured with embit on 20/11/2026) and its check, seconds.
-FINGERPRINT_CANDIDATES = 16
+FINGERPRINT_CANDIDATES = 3
 FINGERPRINT_COST = 0.1
 
 # Guards of a valid seed (see guard), chosen on simulated pages kept apart
@@ -650,7 +647,7 @@ def is_fingerprint(crop: Image.Image) -> bool:
     found = fingerprint_margins(crop)
     if fingerprint_accepted(found):
         return True
-    if not EXPERT_JUDGE or found is None or sum(m for m, _ in found) / len(found) < FINGERPRINT_RESCUE_MARGIN:
+    if found is None or sum(m for m, _ in found) / len(found) < FINGERPRINT_RESCUE_MARGIN:
         return False
     # near the threshold: the fingerprint network has the last word, with the same thresholds
     _, decoder, _ = load_engine()
@@ -744,7 +741,10 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
         The words are found by the detector (detector.find_words) and read;
         a valid seed then goes through the guards (see guard), and a
         fingerprint line written with the words is checked
-        (check_fingerprint).
+        (check_fingerprint). A reading neither verified nor valid is tried
+        again without the words that may be scribbled over (see
+        detector.CROSSED_OUT); the second one is kept if it is verified, or
+        else has a better status, or else a more probable seed.
     """
     progress = Progress(progress or (lambda fraction: None), detector.DETECTOR_COST + 12 * (WORD_COST + OTHER_WORD_COST))
     if not _engine:
@@ -781,7 +781,7 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
 
     try:
         reading, not_found = attempt(False)
-        if CROSSED_CHECK and not (reading is not None and (getattr(reading, "verified", False)
+        if not (reading is not None and (getattr(reading, "verified", False)
                                                            or reading.analyze().status == "valid")):
             # neither verified nor valid: a second search without the words that may be scribbled over (see
             # detector.CROSSED_OUT), kept if it reads better
@@ -816,13 +816,6 @@ def check_fingerprint(reading: SeedReading, pool: list, progress: Progress) -> S
             seen.add(tuple(seed))
             candidates.append((seed, words))
     progress.expect(len(candidates) * FINGERPRINT_COST)
-    if RECORD:
-        # every candidate checked, for the study of the threshold (benches only)
-        fps = [fingerprint.seed_fingerprint(seed) for seed, _ in candidates]
-        r = check.readings[0]
-        check.record = [(rank, list(seed), fp, e, m) for rank, ((seed, _), fp, e, m)
-                        in enumerate(zip(candidates, fps, r.exact_probabilities(fps), r.probabilities(fps)))]
-        check.weights = r.shift_weights() if r.shifts else None
     matched = None
     # the chosen seed first, then the others together (one pass of the networks' outputs for all of them)
     for group in (candidates[:1], candidates[1:]):
@@ -855,15 +848,3 @@ def check_fingerprint(reading: SeedReading, pool: list, progress: Progress) -> S
     return verified
 
 
-
-# Experiment switches (task-4326, benches only; removed before integration): HW_OFF=A,B,Bp,C turns corrections off,
-# HW_RECORD=1 records the probability of the fingerprint of every candidate seed
-import os as _os  # noqa: E402
-_off = set(_os.environ.get("HW_OFF", "").split(","))
-fingerprint.SHIFTS = "B" not in _off
-detector.GLUED_NUMBER = "Bp" not in _off
-detector.OFF_SHEET_CHECK = "A" not in _off
-EXPERT_JUDGE = "J" not in _off
-CROSSED_CHECK = "C" not in _off
-detector.SPECK_CHECK = "S" not in _off
-RECORD = bool(_os.environ.get("HW_RECORD"))

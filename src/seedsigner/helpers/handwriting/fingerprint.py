@@ -19,7 +19,9 @@
     most 1 / MIN_MATCH_PROBABILITY strings reach it: the fingerprint of a
     wrong seed, uniform over 2^32 values, matches by chance with a
     probability of at most 1 / (MIN_MATCH_PROBABILITY * 2^32) whatever the
-    calibration of the network.
+    calibration of the network. A digit missed or one too many in the
+    reading (SHIFTS) is taken into account by a mixture of distributions over
+    the same strings, which keeps that bound.
 """
 import math
 
@@ -35,9 +37,15 @@ HEX_CLASSES = np.array([1 + ALPHABET.index(c) for c in HEX])
 PREFIXES = ("", "fp", "xfp", "mfp", "fingerprint")
 
 # Probability of a fingerprint given the line, among all strings of 8
-# hexadecimal digits, above which it matches (chance match of a wrong seed:
-# at most 1 / (MIN_MATCH_PROBABILITY * 2^32) = 2.3e-6 per seed checked)
-MIN_MATCH_PROBABILITY = 1e-4
+# hexadecimal digits, above which it matches. Chance match of a wrong seed:
+# at most 1 / (MIN_MATCH_PROBABILITY * 2^32) = 3.3e-7 per seed checked, and
+# at most FINGERPRINT_CANDIDATES (3, see __init__.py) times that, 1.0e-6,
+# per photo. Chosen on 21/11/2026 as the lowest threshold whose bound per
+# photo is at most 1e-6, for the number of candidates that verified the most
+# right seeds on the tuning pages (simulated lists with a fingerprint kept
+# apart from the tests, and the development half of the real photos);
+# docs/empreinte.md, section task-4326.
+MIN_MATCH_PROBABILITY = 7e-4
 
 # A digit missed or one too many in the reading of the line (a digit taken
 # for a line number and left out of the crop, two strokes read as two

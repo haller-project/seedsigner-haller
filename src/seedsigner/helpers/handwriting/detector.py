@@ -123,7 +123,6 @@ FINGERPRINT_MAX_LINES = 3
 MAX_HEIGHT_SHARE = 2.0
 OFF_SHEET = 0.4
 OFF_SHEET_PERCENTILE = 90
-OFF_SHEET_CHECK = True
 # Gray levels under the boxes are measured on the photo reduced this many times, on the box widened by STATS_MARGIN
 # heights above and below
 STATS_REDUCE = 4
@@ -137,11 +136,9 @@ CROSSED_OUT = 1.8
 # A word kernel of fewer than SPECK times the median pixels of the kernels of its document is a speck or text seen
 # through the sheet, left out when the count is wrong (same photo: 4 and 7 pixels against a median of 90)
 SPECK = 0.15
-SPECK_CHECK = True
 # a number box ending at most this many heights before the start of a line tried as the fingerprint is taken in
 # with it (its first digit read as a line number), the line alone tried next
 FINGERPRINT_NUMBER_GAP = 0.6
-GLUED_NUMBER = True
 
 # Expected duration on a Pi Zero, in seconds (see Progress in __init__.py): network and decoding, reading of a number
 DETECTOR_COST = 1.8
@@ -522,7 +519,7 @@ class InkStats:
 
 
 
-def with_number(line: Box, numbers: list[Box], always: bool = False) -> Box | None:
+def with_number(line: Box, numbers: list[Box]) -> Box | None:
     """
         The line widened to the number boxes centered before its start on its
         line and ending at most FINGERPRINT_NUMBER_GAP heights before it, or
@@ -531,7 +528,7 @@ def with_number(line: Box, numbers: list[Box], always: bool = False) -> Box | No
     """
     before = [n for n in numbers if abs(n.c - line.c) < SAME_LINE * max(line.h, n.h)
               and n.middle < line.a0 and n.a1 >= line.a0 - FINGERPRINT_NUMBER_GAP * line.h]
-    if not before or not (GLUED_NUMBER or always):
+    if not before:
         return None
     wide = copy_box(line)
     wide.a0 = min(n.a0 for n in before)
@@ -1118,7 +1115,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
             raise WordsNotFound("no word crossed out")
         det = copy.copy(det)
         det.words = [b for b in det.words if not any(b is c for c in scribbled)]
-        det.numbers = [n for n in det.numbers if not any(with_number(c, [n], True) for c in scribbled)]
+        det.numbers = [n for n in det.numbers if not any(with_number(c, [n]) for c in scribbled)]
     groups, number_groups = {}, {}
     for b in det.words:
         if b.score > 0:
@@ -1135,7 +1132,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     def add_candidate(g, boxes):
         columns = group_lines([copy_box(b) for b in boxes])
         n = sum(len(c) for c in columns)
-        if n not in page.SEED_LENGTHS and OFF_SHEET_CHECK:
+        if n not in page.SEED_LENGTHS:
             # boxes on a background much darker than that of the others are off the sheet (the table or the shadow
             # around it), boxes much taller than the others are objects around the sheet: never words
             h = float(np.median([b.h for b in boxes]))
@@ -1145,7 +1142,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
                 groups[g] = boxes
                 columns = group_lines([copy_box(b) for b in boxes])
                 n = sum(len(c) for c in columns)
-        if n not in page.SEED_LENGTHS and SPECK_CHECK:
+        if n not in page.SEED_LENGTHS:
             # word kernels much smaller than the others are specks or text seen through the sheet: never words
             median = float(np.median([b.pixels for b in boxes]))
             specks = [b for b in boxes if b.pixels < SPECK * median]
@@ -1238,7 +1235,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     if count not in page.SEED_LENGTHS:
         raise WordsNotFound(f"{count} lines found", at_edge=at_edge, line_count=count, card=g >= 0 and at_edge)
     lines = [b for c in columns for b in c]
-    spare_line = spare_first if GLUED_NUMBER else None
+    spare_line = spare_first
     if spare is None and fingerprint is not None:
         # a line of the document outside the words (above, below or beside them, numbered or not, with a list
         # counted by its numbers too) is tried as the fingerprint before it is taken for a word left out

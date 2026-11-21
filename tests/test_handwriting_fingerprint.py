@@ -231,11 +231,15 @@ def test_fingerprint_of_another_seed_never_makes_it_wrong():
 
 
 def test_chance_match_bound():
-    """ The probabilities of all strings of 8 digits sum to 1: at most 1 / MIN_MATCH_PROBABILITY of them match. """
+    """ The probabilities of all strings of 8 digits sum to 1: at most 1 / MIN_MATCH_PROBABILITY of them match; a
+    wrong seed is verified by chance with a probability of at most 1e-6 per photo. """
     lp = random_log_probs(40, "0123456789abcdef", 9)
     reading = fingerprint.FingerprintReading(lp)
     assert np.allclose(reading.digits.sum(1), 1.0)
     assert 1 / (fingerprint.MIN_MATCH_PROBABILITY * 2 ** 32) < 3e-6
+    # per photo: at most FINGERPRINT_CANDIDATES seeds are checked against the one fingerprint line
+    from seedsigner.helpers import handwriting
+    assert handwriting.FINGERPRINT_CANDIDATES / (fingerprint.MIN_MATCH_PROBABILITY * 2 ** 32) <= 1e-6
 
 
 

@@ -304,3 +304,36 @@ def erase_lines(line: Image.Image) -> Image.Image:
             paper = max(a[above, x], a[below, x], float(background[top:bottom + 1, x].max()))
             a[top:bottom + 1, x] = paper
     return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
+
+
+LEVEL_MIN_DRIFT = 1.5         # a line drifting by fewer rows over the width is left as it is
+
+
+def level_lines(line: Image.Image) -> Image.Image:
+    """
+        `line` (grayscale word crop) sheared vertically so that the straight
+        printed or ruled lines crossing it (find_lines) become horizontal, as
+        normalize_word expects them; unchanged if there is none or if they
+        are already nearly horizontal.
+    """
+    line = line.convert("L")
+    small = line.reduce(-(-line.height // WORKING_HEIGHT)) if line.height > WORKING_HEIGHT else line
+    a = np.asarray(small, np.float32)
+    h, w = a.shape
+    if w < 24:
+        return line
+    background = box_mean(a, max(4, h // 4))
+    ink = np.clip((background - a) / np.maximum(0.5 * background, 1), 0, 1)
+    strongest = np.percentile(ink, 99.5)
+    if strongest < 0.08:
+        return line
+    found = find_lines(ink > 0.5 * max(0.06, 0.35 * strongest), max(2, int(round(0.08 * h))))
+    if not found:
+        return line
+    s = found[0][0]
+    if abs(s) * w < LEVEL_MIN_DRIFT:
+        return line
+    W, H = line.size
+    paper = int(np.percentile(np.asarray(line), 75))
+    # output (x, y) takes the input at (x, y + s (x - W / 2))
+    return line.transform((W, H), Image.AFFINE, (1, 0, 0, s, 1, -s * W / 2), Image.BILINEAR, fillcolor=paper)

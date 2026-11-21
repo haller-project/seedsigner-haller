@@ -48,7 +48,7 @@ from PIL import Image, ImageDraw
 from . import native
 from . import page
 from .page import WordLayout, WordsNotFound
-from .preprocess import erase_lines, normalize_word
+from .preprocess import erase_lines, level_lines, normalize_word
 
 DETECTOR_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "resources", "handwriting",
                              "haller-1-detector.npz")
@@ -103,8 +103,10 @@ ORDER_MARGIN = math.log(1e4)  # log-likelihood lead of the best order over the o
 ORIENTATION_WORDS = 3
 ORIENTATION_MARGIN = 1.0
 
-# Printed or ruled lines erased from the word crops (preprocess.erase_lines): on cards, on every document or None
-ERASE_LINES = "cards"
+# Printed or ruled lines of the word crops: made horizontal (preprocess.level_lines) or erased (erase_lines), on cards
+# or on every document; None: left as they are
+LINE_MODE = "level"
+LINE_DOCUMENTS = "cards"
 
 # Word crops around the box, in box heights (horizontal, top, bottom): first reading, taller band, wider band
 CROP_VARIANTS = ((0.6, 0.85, 0.75), (0.6, 1.1, 1.0), (1.2, 0.8, 0.7))
@@ -1112,7 +1114,9 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None) -> WordL
 
     def crop(k, variant):
         c = rectified_crop(image, quads[variant][k], fill)
-        return erase_lines(c) if ERASE_LINES == "all" or (ERASE_LINES == "cards" and g >= 0) else c
+        if LINE_MODE is None or (LINE_DOCUMENTS == "cards" and g < 0):
+            return c
+        return level_lines(c) if LINE_MODE == "level" else erase_lines(c)
 
     kind = "list" if g < 0 else ("card24" if count > 12 else "card12")
     layout = WordLayout(kind, count, orders, len(CROP_VARIANTS), crop, lambda k: quads[0][k],

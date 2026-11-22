@@ -134,6 +134,12 @@ FINGERPRINT_CROPS = (CROP_VARIANTS[0], (0.6, 0.6, 0.5))
 # longer), the longest ones first, at most this many
 FINGERPRINT_MIN_LENGTH = 2.0
 FINGERPRINT_MAX_LINES = 3
+FINGERPRINT_TAIL = True       # the last piece of the first or last line of a column, far from the word, is tried as the
+                              # fingerprint (« 12. GUARD 2cd9b02c », find_words)
+TAIL_GAP = 1.5                # heights between the word and that piece, at least
+FINGERPRINT_OPTIONAL_ANY = True  # with a valid count and no line passing the fingerprint thresholds, the one line outside
+                              # the words (or tail) passing the loose margin is checked, the list kept if it matches no
+                              # seed (layout.fingerprint_optional; before: rows across the columns only)
 # A word box whose background (OFF_SHEET_PERCENTILE of the gray levels of its crop) is darker than OFF_SHEET times
 # the median background of the words of its document is off the sheet, left out when the count is wrong (real photos
 # of the Pi, 21/11/2026: phantom words on the dark table below the sheet at 0.02 to 0.11, words on paper at 0.79 or more)
@@ -1956,24 +1962,62 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
                 if fingerprint(crop):
                     accepted.append((line, crop))
                     break
+        # a fingerprint written on the row of the first or last word of a column, after it (« 12. GUARD 2cd9b02c »):
+        # the last piece of that line, more than TAIL_GAP heights after the piece before it, is tried as the fingerprint;
+        # taken, it is cut off the line (tails: (line, piece, end of the word))
+        tails = []
+        if FINGERPRINT_TAIL and not accepted:
+            ends = {id(b): b for column in columns for b in (column[0], column[-1])}
+            for line in ends.values():
+                pieces = sorted((b for b in groups[g] if covers(line, b.center)), key=lambda b: b.a0)
+                if len(pieces) < 2:
+                    continue
+                last, before = pieces[-1], pieces[-2]
+                if last.a0 - before.a1 < TAIL_GAP * h or last.a1 - last.a0 < FINGERPRINT_MIN_LENGTH * h:
+                    continue
+                tail = copy_box(last)
+                tail.a1 = max(tail.a1, line.a1)
+                tails.append((line, tail, before.a1))
+            for line, tail, _ in tails:
+                for margins in FINGERPRINT_CROPS:
+                    crop = rectified_crop(image, det.to_photo(tail.quad(margins)), fill)
+                    if fingerprint(crop):
+                        accepted.append((tail, crop))
+                        break
         margin_of = getattr(fingerprint, "margin", None)
         optional = False
-        if not accepted and bridged_rows and margin_of is not None:
-            # a row left out across the columns (bridged_columns) read best as 8 hexadecimal digits by the fingerprint
-            # network: checked as the fingerprint, the list kept as read if it matches no seed (layout.fingerprint_optional)
+        if not accepted and margin_of is not None and (bridged_rows or FINGERPRINT_OPTIONAL_ANY):
+            # a row left out across the columns (bridged_columns), or else (FINGERPRINT_OPTIONAL_ANY) any line outside
+            # the words or tail, read best as 8 hexadecimal digits by the fingerprint network: checked as the
+            # fingerprint, the list kept as read if it matches no seed (layout.fingerprint_optional); exactly one must
+            # pass the loose margin (one check per search, as on the other paths)
             passing = []
-            for line in tried:
-                if any(covers(line, b.center) for row in bridged_rows for b in row):
-                    wide = with_number(line, det.numbers, after=True)
-                    for box, margins in itertools.product([wide] * (wide is not None) + [line], FINGERPRINT_CROPS):
-                        crop = rectified_crop(image, det.to_photo(box.quad(margins)), fill)
+            candidates = [line for line in tried if not bridged_rows
+                          or any(covers(line, b.center) for row in bridged_rows for b in row)]
+            for line in candidates:
+                wide = with_number(line, det.numbers, after=True)
+                for box, margins in itertools.product([wide] * (wide is not None) + [line], FINGERPRINT_CROPS):
+                    crop = rectified_crop(image, det.to_photo(box.quad(margins)), fill)
+                    if margin_of(crop) is not None:
+                        passing.append((line, crop))
+                        break
+            if not bridged_rows:
+                for line, tail, _ in tails:
+                    for margins in FINGERPRINT_CROPS:
+                        crop = rectified_crop(image, det.to_photo(tail.quad(margins)), fill)
                         if margin_of(crop) is not None:
-                            passing.append((line, crop))
+                            passing.append((tail, crop))
                             break
             if len(passing) == 1:
                 accepted, optional = passing, True
         if len(accepted) == 1:
             spare_line, spare = accepted[0]
+            for line, tail, end in tails:
+                if tail is spare_line:
+                    # the word alone on its line, a quarter of a height after its last piece
+                    line.a1 = min(line.a1, end + 0.25 * line.h)
+                    if hasattr(line, "ink"):
+                        line.ink = min(line.ink, line.a1 - line.a0)
     else:
         optional = False
     words_left = [(b.score, (b.a1 - b.a0) / b.h, det.card_of(b.center) != g) for b in det.words

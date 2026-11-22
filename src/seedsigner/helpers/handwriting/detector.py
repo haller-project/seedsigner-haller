@@ -66,7 +66,9 @@ MIN_CARD_KERNEL = 150         # output pixels of a card kernel component (smalle
 MIN_GROUP_WORDS = 3           # a document with fewer words is a blank card or noise
 ALL = -2                      # document made of every word found, cards and free words together
 MIN_OTHER_WORDS = 6           # words of another document making every word uncertain
-CARD_SHAPE = True             # a card kernel holds a document only if it has the shape of a card (Detection.shaped)
+CARD_SHAPE = False            # (variant, off) a card kernel holds a document only if it has the shape of a card
+                              # (Detection.shaped); on the benches it frees the words of SeedSigner cards cut by the
+                              # frame (task-4434: 16 seeds lost on cadrages and devr)
 CARD_MIN_PIXELS = 3000        # output pixels of a card kernel with the shape of a card (cards read on the photos of the
                               # site: 4 700 to 23 000; parts of a sheet taken for a card: 150 to 2 500)
 CARD_MIN_COMPACTNESS = 0.55   # share of its oriented bounding rectangle covered by such a kernel (cards: 0.61 to 0.96;
@@ -74,8 +76,9 @@ CARD_MIN_COMPACTNESS = 0.55   # share of its oriented bounding rectangle covered
 NUMBER_CHECK = True           # numbers read that contradict the order of the words make the list incoherent
                               # (find_words: layout.numbers_incoherent)
 NUMBER_SURE = 0.9             # probability of the value of a number read taken into account by that check
-EXTRA_LINES_ANY = True        # rows of a list tried as a label or a fingerprint (layout.extra_lines) also when words are
-                              # left out of the lines (before: only when every word box was on a line)
+EXTRA_LINES_ANY = False       # (variant, off) rows of a list tried as a label or a fingerprint (layout.extra_lines)
+                              # also when words are left out of the lines; off: only when every word box is on a line,
+                              # as since 986e493 (task-4434: no seed gained on the benches, up to +88 s on the Pi)
 BEYOND_TEXT = 0.3             # writing of a card farther than this many word heights beyond its text: card cut there
 ZOOM_SHARE = 0.5              # documents covering less of the photo are detected again on their region (0.4 before
                               # the detector of 21/11/2026)

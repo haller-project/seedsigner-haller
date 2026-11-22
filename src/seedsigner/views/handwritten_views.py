@@ -102,7 +102,7 @@ class HandwrittenReadView(View):
         def read_function(screen):
             photo = Camera.get_instance().decode_frame(self.photo, expand=True, grayscale=True)
             screen.show_photo(photo)
-            return read_seed(photo, progress=screen.report_progress, on_word=screen.show_word)
+            return read_seed(photo, progress=screen.report_progress, on_word=screen.show_word, on_stage=screen.show_stage)
 
         try:
             reading = self.run_screen(HandwrittenReadingScreen, read_function=read_function)

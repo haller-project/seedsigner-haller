@@ -27,9 +27,9 @@
       2. lines and columns (group_lines), or a tight grid of rows
          (grid_columns); on a document with MIN_ANCHOR_NUMBERS numbers or more,
          one slot per number (anchored_slots);
-      3. orientation: numbers after their words mean the page is upside down,
-         numbers before them that it is upright; without numbers, the words
-         reading better turned over;
+      3. orientation: the page is read upright, as given (the photo is turned
+         by its EXIF only; small slants and perspective are followed by the
+         boxes);
       4. order: column by column or row by row; when both are possible, the
          numbers are read until one order leads by ORDER_MARGIN, otherwise both
          are given to the analysis, which makes every word uncertain if both
@@ -118,11 +118,6 @@ MIN_ROW_WORDS = 3             # words of each row but the last of words written 
 MIN_ROW_WORD_LENGTH = 1.2     # length of every word written in rows (three letters at least), in heights
 BAND_GAP = 1.2                # largest gap between two lines of every column, at the same row, above this many
                               # median line spacings: the page may be two bands read one after the other
-
-# Orientation: the tallest ORIENTATION_WORDS words are read in both directions; the page is upside down if the
-# turned readings lead by ORIENTATION_MARGIN (summed log-likelihoods per unit of width)
-ORIENTATION_WORDS = 3
-ORIENTATION_MARGIN = 1.0
 
 # Word crops around the box, in box heights (horizontal, top, bottom): first reading, taller band, wider band
 CROP_VARIANTS = ((0.6, 0.85, 0.75), (0.6, 1.1, 1.0), (1.2, 0.8, 0.7))
@@ -1238,6 +1233,7 @@ def band_max(logits: np.ndarray, box: Box) -> float:
 
 # ---------- numbers ----------
 
+
 def numbers_before(lines: list[Box], numbers: list[Box]) -> bool:
     """
         True if at least three numbers lie just before a word along the text
@@ -1254,30 +1250,10 @@ def numbers_before(lines: list[Box], numbers: list[Box]) -> bool:
 
 
 
-def upside_down(lines: list[Box], numbers: list[Box]) -> bool:
-    """
-        True if most numbers next to the lines lie after their words along the
-        text: the page is turned over.
-    """
-    before = after = 0
-    for n in numbers:
-        x = n.middle
-        near = [(max(b.a0 - x, x - b.a1), x < b.a0 + 0.5 * b.h) for b in lines
-                if abs(b.c - n.c) < SAME_LINE * max(b.h, n.h)]
-        if not near:
-            continue
-        gap, is_before = min(near)
-        if gap <= 3 * n.h:
-            before += is_before
-            after += not is_before
-    return after > before and after >= max(3, len(lines) // 3)
-
-
-
 def link_numbers(det: Detection, lines: list[Box], numbers: list[Box]) -> dict[int, Box]:
     """
         {line index: number}: each number linked to the word line that follows
-        it on its line (or precedes it, page upside down), by the link map, or
+        it on its line (or precedes it), by the link map, or
         else to the nearest line within NUMBER_GAP heights.
     """
     pairs = []
@@ -1612,31 +1588,6 @@ def order_by_numbers(orders: list[list[int]], probabilities: dict) -> list[list[
     if all(scores[best] - s >= ORDER_MARGIN for i, s in enumerate(scores) if i != best):
         return [orders[best]]
     return None
-
-
-
-# ---------- orientation ----------
-
-def turned_by_reading(photo: Image.Image, quads: list, fill: int) -> bool:
-    """
-        True if the tallest words read better turned by 180 degrees: sum over
-        them of the score of the best dictionary word, per unit of width.
-    """
-    from . import load_engine
-    first, decoder, _ = load_engine()
-    tallest = sorted(range(len(quads)), key=lambda k: -np.linalg.norm(np.subtract(quads[k][3], quads[k][0])))
-    lead = 0.0
-    for k in tallest[:ORIENTATION_WORDS]:
-        crop = rectified_crop(photo, quads[k], fill)
-        best = []
-        for im in (crop, crop.rotate(180)):
-            ink = normalize_word(im)
-            if ink is None:
-                best.append(-20.0)
-            else:
-                best.append(float(decoder.scores(first.log_probs(ink)).astype(np.float64).max()) / max(1, ink.shape[1] / 32))
-        lead += best[1] - best[0]
-    return lead > ORIENTATION_MARGIN
 
 
 
@@ -2033,17 +1984,13 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     numbers = number_groups.get(g, [])
     linked = anchored["numbers"] if anchored else link_numbers(det, lines, numbers)
     quads = [[det.to_photo(b.quad(m)) for b in lines] for m in CROP_VARIANTS]
-    turned = upside_down(lines, list(linked.values()) or numbers)
-    if not turned and not numbers_before(lines, list(linked.values()) or numbers):
-        # no number on either side of the words: reading a few words both ways tells
-        turned = turned_by_reading(image, quads[0], fill)
 
     first_number_needed = last_number_needed = False
     if g >= 0 and det.cut_sides(g):
         # card reaching the frame after its text or below it: cut if writing of the card is seen beyond its text on
         # that side, otherwise whole only if the number of its last word is its count; before or above it: the
         # first number must be 1
-        ux, uy = (-lines[0].ux, -lines[0].uy) if turned else (lines[0].ux, lines[0].uy)
+        ux, uy = lines[0].ux, lines[0].uy
         h = float(np.median([b.h for b in lines]))
         for nx, ny in det.cut_sides(g):
             if nx * ux + ny * uy > 0.5 or -nx * uy + ny * ux > 0.5:
@@ -2059,9 +2006,6 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
                 first_number_needed = True
     orders = anchored["orders"] if anchored else \
         [list(range(count))] if in_rows else candidate_orders(columns, bands=len(linked) >= MIN_NUMBERS_READ)
-    if turned:
-        quads = [[q[2:] + q[:2] for q in variant] for variant in quads]
-        orders = [list(reversed(o)) for o in orders]
 
     read_numbers = {}
 
@@ -2069,7 +2013,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         if k not in read_numbers:
             q = det.to_photo(linked[k].quad(NUMBER_CROP_MARGINS))
             step(NUMBER_COST)
-            read_numbers[k] = number_probabilities(image, q[2:] + q[:2] if turned else q, fill)
+            read_numbers[k] = number_probabilities(image, q, fill)
         return read_numbers[k]
 
     if first_number_needed and not at_edge:

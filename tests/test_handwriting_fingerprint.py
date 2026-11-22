@@ -237,7 +237,8 @@ def test_chance_match_bound():
     reading = fingerprint.FingerprintReading(lp)
     assert np.allclose(reading.digits.sum(1), 1.0)
     assert 1 / (fingerprint.MIN_MATCH_PROBABILITY * 2 ** 32) < 3e-6
-    # per photo: at most FINGERPRINT_CANDIDATES seeds are checked against the one fingerprint line
+    # per photo: at most FINGERPRINT_CANDIDATES (seed, line) pairs are compared, over both searches
+    # (test_two_searches_check_three_seeds_at_most)
     from seedsigner.helpers import handwriting
     assert handwriting.FINGERPRINT_CANDIDATES / (fingerprint.MIN_MATCH_PROBABILITY * 2 ** 32) <= 1e-6
 
@@ -282,3 +283,68 @@ def test_fingerprint_read_one_digit_short_or_long():
     # a line of 8 digits read right keeps nearly all its probability
     line = frames_of("5da096c9")
     assert fingerprint.FingerprintReading(line, shifts=True).probabilities(["5da096c9"])[0] > 0.9
+
+
+
+def test_two_searches_check_three_seeds_at_most(monkeypatch):
+    """ A fingerprint that matches no seed read leaves every word uncertain, so that the photo is searched a
+    second time (words that may be crossed out left out): both searches together compare at most
+    FINGERPRINT_CANDIDATES seeds with the fingerprint line, which bounds the chance match of a wrong seed per
+    photo (FingerprintBudget). """
+    from embit import bip39
+    from seedsigner.helpers import handwriting
+    words = bip39.mnemonic_from_bytes(bytes(random.Random(5).getrandbits(8) for _ in range(16))).split()
+    other = bip39.mnemonic_from_bytes(bytes(random.Random(6).getrandbits(8) for _ in range(16))).split()
+    compared, searches = [], []
+    seed_fingerprint, find_words = fingerprint.seed_fingerprint, handwriting.detector.find_words
+    monkeypatch.setattr(fingerprint, "seed_fingerprint", lambda seed: compared.append(seed) or seed_fingerprint(seed))
+    monkeypatch.setattr(handwriting.detector, "find_words",
+                        lambda *a, **k: searches.append(k.get("crossed")) or find_words(*a, **k))
+    reading = handwriting.read_seed(rendered_list(words + [fingerprint.seed_fingerprint(other)]))
+    assert True in searches and False in searches
+    assert not reading.verified and reading.fingerprint.status == "mismatch"
+    assert 1 <= len(compared) <= handwriting.FINGERPRINT_CANDIDATES
+
+
+
+class _Check:
+    """ Fingerprint check whose line matches the seeds of `matching` only. """
+    def __init__(self, matching):
+        self.matching, self.checked, self.match_probability, self.status = matching, 0, 0.0, None
+
+    def probabilities(self, fingerprints):
+        return [1.0 if fp in self.matching else 0.0 for fp in fingerprints]
+
+
+
+def test_pending_candidates_most_probable_first(monkeypatch):
+    """ The candidates left by two searches are compared the most probable first, within the budget left:
+    a match beyond it is not taken. """
+    from seedsigner.helpers import handwriting
+    from seedsigner.helpers.handwriting import FingerprintBudget, PendingCheck, SeedReading, WordReading
+    monkeypatch.setattr(fingerprint, "seed_fingerprint", lambda seed: seed[0])
+
+    def pending(check, candidates):
+        reading = SeedReading("list", [WordReading(None, [("abandon", 0.0)])])
+        return PendingCheck(reading, check, [([w], [WordReading(None, [(w, 0.0)])], lp) for w, lp in candidates],
+                            line=id(check))
+
+    progress = handwriting.Progress(lambda f: None, 1.0)
+    first, second = _Check({"c"}), _Check({"x"})
+    budget = FingerprintBudget(2)
+    budget.pending = [pending(first, [("b", -9.0), ("c", -8.0)]), pending(second, [("x", -1.0), ("y", -2.0)])]
+    verified = handwriting.resolve_fingerprints(budget, progress)
+    # x (-1) then y (-2) are the two most probable: c (-8) is not compared
+    assert verified.verified and verified.words[0].candidates[0][0] == "x" and first.checked == 0
+    assert budget.left == 0
+
+    third = _Check({"c"})
+    budget = FingerprintBudget(1)
+    budget.pending = [pending(third, [("b", -9.0), ("c", -1.0)]), pending(_Check(set()), [("y", -2.0)])]
+    verified = handwriting.resolve_fingerprints(budget, progress)
+    assert verified.words[0].candidates[0][0] == "c" and third.checked == 1
+
+    # a single search: its order is kept, whatever the probabilities
+    budget = FingerprintBudget(1)
+    budget.pending = [pending(_Check({"c"}), [("b", -9.0), ("c", -1.0)])]
+    assert handwriting.resolve_fingerprints(budget, progress) is None

@@ -45,7 +45,10 @@ LABELS = ("fingerprint", "masterfingerprint", "masterfp", "fp", "xfp", "mfp", "s
 # hexadecimal digits, above which it matches. Chance match of a wrong seed:
 # at most 1 / (MIN_MATCH_PROBABILITY * 2^32) = 3.3e-7 per seed checked, and
 # at most FINGERPRINT_CANDIDATES (3, see __init__.py) times that, 1.0e-6,
-# per photo. Chosen on 21/11/2026 as the lowest threshold whose bound per
+# per photo: at most 3 (seed, line) pairs are compared over the whole reading
+# of a photo, its two searches included (FingerprintBudget in __init__.py).
+# A pair is counted once per line read, so that the bound holds whichever
+# lines the searches read. Chosen on 21/11/2026 as the lowest threshold whose bound per
 # photo is at most 1e-6, for the number of candidates that verified the most
 # right seeds on the tuning pages (simulated lists with a fingerprint kept
 # apart from the tests, and the development half of the real photos);

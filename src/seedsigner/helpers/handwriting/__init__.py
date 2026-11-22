@@ -149,10 +149,13 @@ NO_WORD_FIT = -25.0
 # layout), in order of rank: the first one whose fingerprint matches (see
 # fingerprint.MIN_MATCH_PROBABILITY) is the seed written, every word certain.
 # When none matches, the seed is never called wrong (a word or a digit may be
-# misread): every word is uncertain. With 3 candidates and the threshold of
-# fingerprint.py, a wrong seed is verified by chance with a probability of at
-# most 1e-6 per photo (the right seed was among the first 3 on all but 6 of
-# 1 698 pages with a fingerprint read, 21/11/2026). FINGERPRINT_COST: computation of one fingerprint on a Pi
+# misread): every word is uncertain. FINGERPRINT_CANDIDATES is also the number
+# of seeds compared with a fingerprint line over the whole reading of a photo,
+# both searches of read_seed and every path included (FingerprintBudget): with
+# the threshold of fingerprint.py, a wrong seed is verified by chance with a
+# probability of at most 3 x 3.3e-7 = 1e-6 per photo (the right seed was among
+# the first 3 on all but 6 of 1 698 pages with a fingerprint read,
+# 21/11/2026). FINGERPRINT_COST: computation of one fingerprint on a Pi
 # Zero (PBKDF2-HMAC-SHA512, 2048 rounds, 0.062 s; master key and HASH160,
 # 0.005 s; measured with embit on 20/11/2026) and its check, seconds.
 FINGERPRINT_CANDIDATES = 3
@@ -658,7 +661,7 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
         Reads the words of `reader.layout` with `weights`, reporting each one to
         `progress` and to `on_word` (see read_seed). The plausible seeds of the
         reading orders are appended to `plausible`; their most probable valid
-        seeds to `pool`, as (rank, words, word readings).
+        seeds to `pool`, as (rank, words, word readings, log-probability of the words).
     """
     layout = reader.layout
     words = []
@@ -703,8 +706,10 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
     readings = [reading] + [seed_reading(order) for order in layout.orders[1:]]
     if pool is not None and getattr(layout, "fingerprint", None) is not None:
         for r in readings:
-            for rank, seed in enumerate(r.analyze().valid_seeds(FINGERPRINT_CANDIDATES)):
-                pool.append((rank, seed, r.words))
+            analysis = r.analyze()
+            for rank, (seed, log_p) in enumerate(zip(analysis.valid_seeds(FINGERPRINT_CANDIDATES),
+                                                     analysis.valid_seed_log_probabilities(FINGERPRINT_CANDIDATES))):
+                pool.append((rank, seed, r.words, log_p))
     if any(r.analyze().status != "invalid" for r in readings[1:]):
         order = reader.numbered_order()
         if order is not None:
@@ -976,6 +981,11 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
 
     spare_line.role = role
 
+    budget = FingerprintBudget()
+    # the first search compares its most probable seed at once (a match spares the second search), the second one none:
+    # their other candidates are compared together at the end (see FingerprintBudget)
+    now = {False: 1, True: 0}
+
     def attempt(crossed: bool):
         pool = []
 
@@ -1020,7 +1030,7 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
                 if other.analyze().status == "valid":
                     guard(other)
                 if other.fingerprint_crop is not None:
-                    other = check_fingerprint(other, extra_pool, progress)
+                    other = check_fingerprint(other, extra_pool, progress, budget=budget, now=now[crossed])
                 if getattr(other, "verified", False) \
                         or reading is None and not other.layout.fingerprint_hypothesis:
                     return other, None
@@ -1037,14 +1047,15 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             # a single line outside the rows across the columns (detector.FINGERPRINT_OPTIONAL_ANY): read on its crop
             # only, whose outputs were computed for the loose margin
             checked = check_fingerprint(reading, pool, progress,
-                                        trim=not getattr(reading.layout, "fingerprint_single", False))
+                                        trim=not getattr(reading.layout, "fingerprint_single", False),
+                                        budget=budget, now=now[crossed])
             if getattr(checked, "verified", False):
                 reading = checked
             else:
                 reading.doubtful, reading._last = doubtful, None
                 reading.fingerprint_crop, reading.fingerprint = None, None
         elif reading.fingerprint_crop is not None:
-            reading = check_fingerprint(reading, pool, progress)
+            reading = check_fingerprint(reading, pool, progress, budget=budget, now=now[crossed])
         if getattr(reading.layout if hasattr(reading, "layout") else None, "fingerprint_hypothesis", False) \
                 and not getattr(reading, "verified", False):
             # a line left out as a fingerprint hypothesis whose fingerprint matches no seed read: the list has one
@@ -1067,6 +1078,9 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             other, _ = attempt(True)
             if rank(other) > rank(reading):
                 reading = other
+        verified = resolve_fingerprints(budget, progress)
+        if verified is not None:
+            reading = verified
     finally:
         detector._detections.clear()
         _crop_cache.clear()
@@ -1079,7 +1093,97 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
 
 
 
-def check_fingerprint(reading: SeedReading, pool: list, progress: Progress, trim: bool = True) -> SeedReading:
+class FingerprintBudget:
+    """
+        Seeds checked against a fingerprint line during one reading of a photo
+        (read_seed): at most FINGERPRINT_CANDIDATES (seed, line) pairs in all,
+        over every search and every path. Each pair verifies a wrong seed by
+        chance with a probability of at most 1 / (MIN_MATCH_PROBABILITY * 2^32)
+        (fingerprint.py), so that a photo does with at most
+        FINGERPRINT_CANDIDATES times that.
+
+        A check made while a second search may follow (`now`) compares its
+        most probable seed only; its other candidates are `pending`. If that
+        check had matched, the second search would not have been made: a
+        candidate compared then could stop it, and the pairs that may verify
+        a photo would be those of both searches. The pending candidates of
+        both searches are compared at the end (resolve), the most probable
+        ones first, within what is left of the budget.
+    """
+    def __init__(self, total: int = None):
+        self.left = FINGERPRINT_CANDIDATES if total is None else total
+        self.pending = []
+        # (seed, line) pairs already compared: a pending one is not compared again
+        self.compared = set()
+
+
+
+class PendingCheck:
+    """
+        Candidates of a fingerprint check left for FingerprintBudget.resolve,
+        with what the reading verified by one of them is made of (taken when
+        the check was made: the reading may change afterwards).
+    """
+    def __init__(self, reading: SeedReading, check, candidates: list, line):
+        self.check = check
+        self.line = line
+        self.candidates = candidates
+        self.kind = reading.kind
+        self.min_seed_probability = reading.min_seed_probability
+        self.numbered = reading.numbered
+        self.fingerprint_crop = reading.fingerprint_crop
+        self.fingerprint_others = list(getattr(reading, "fingerprint_others", []))
+
+
+    def verified_reading(self, seed: list[str], words: list) -> SeedReading:
+        verified = SeedReading(self.kind, [WordReading(w.image, [(word, 0.0)], w.abbreviated & {word})
+                                           for word, w in zip(seed, words)],
+                               self.min_seed_probability)
+        verified.fingerprint_crop = self.fingerprint_crop
+        verified.fingerprint_others = list(self.fingerprint_others)
+        verified.fingerprint = self.check
+        verified.verified = True
+        verified.numbered = self.numbered
+        return verified
+
+
+
+def fingerprint_candidates(pool: list) -> list:
+    """
+        Distinct seeds of `pool` (see read_layout), by rank (the most probable
+        seed of every reading first), as (seed, word readings, log-probability).
+    """
+    candidates, seen = [], set()
+    for _, seed, words, log_p in sorted(pool, key=lambda item: item[0]):
+        if tuple(seed) not in seen:
+            seen.add(tuple(seed))
+            candidates.append((seed, words, log_p))
+    return candidates
+
+
+
+def match_fingerprints(check, group: list, progress: Progress):
+    """
+        Fingerprints of the seeds of `group` (seed, word readings, ...)
+        compared with the line of `check`, in one pass of the networks'
+        outputs: the index of the first one that matches, or None.
+    """
+    fingerprints = []
+    for candidate in group:
+        fingerprints.append(fingerprint.seed_fingerprint(candidate[0]))
+        progress.step(FINGERPRINT_COST)
+    check.checked += len(group)
+    for i, (fp, probability) in enumerate(zip(fingerprints, check.probabilities(fingerprints))):
+        check.match_probability = max(check.match_probability, probability)
+        if probability >= fingerprint.MIN_MATCH_PROBABILITY:
+            check.matched, check.rank = fp, check.checked - len(group) + i
+            return i
+    return None
+
+
+
+def check_fingerprint(reading: SeedReading, pool: list, progress: Progress, trim: bool = True,
+                      budget: FingerprintBudget = None, now: int = None) -> SeedReading:
     """
         Checks the fingerprint line of `reading`, read by the fingerprint
         network (see FINGERPRINT_CANDIDATES)
@@ -1089,6 +1193,11 @@ def check_fingerprint(reading: SeedReading, pool: list, progress: Progress, trim
         `fingerprint` of the reading returned. Without `trim`, the line is
         read on its crop only (not also with FINGERPRINT_TRIM off its top and
         bottom).
+
+        With `budget`, the seeds compared come out of it; with `now` as well,
+        at most `now` of them are compared here and the others are left in
+        `budget.pending` (see FingerprintBudget), the reading being returned
+        as if none of them matched.
     """
     crops = []
     for crop in [reading.fingerprint_crop] + list(getattr(reading, "fingerprint_others", [])):
@@ -1101,43 +1210,68 @@ def check_fingerprint(reading: SeedReading, pool: list, progress: Progress, trim
         return reading
     check = fingerprint.FingerprintCheck([fingerprint.FingerprintReading(fingerprint_log_probs(c, ink))
                                           for c, ink in inks])
-    candidates, seen = [], set()
-    for _, seed, words in sorted(pool, key=lambda item: item[0]):
-        if tuple(seed) not in seen and len(candidates) < FINGERPRINT_CANDIDATES:
-            seen.add(tuple(seed))
-            candidates.append((seed, words))
+    budget = budget or FingerprintBudget()
+    line = tuple((c.size, hash(c.tobytes())) for c in crops)
+    candidates = [c for c in fingerprint_candidates(pool) if (tuple(c[0]), line) not in budget.compared]
+    count = min(len(candidates), budget.left if now is None else min(now, budget.left))
+    later = candidates[count:]
+    candidates = candidates[:count]
+    budget.left -= count
+    budget.compared.update((tuple(c[0]), line) for c in candidates)
+    pending = PendingCheck(reading, check, later, line)
     progress.expect(len(candidates) * FINGERPRINT_COST)
     matched = None
     # the chosen seed first, then the others together (one pass of the networks' outputs for all of them)
     for group in (candidates[:1], candidates[1:]):
         if matched or not group:
             continue
-        fingerprints = []
-        for seed, _ in group:
-            fingerprints.append(fingerprint.seed_fingerprint(seed))
-            progress.step(FINGERPRINT_COST)
-        check.checked += len(group)
-        for i, ((seed, words), fp, probability) in enumerate(zip(group, fingerprints, check.probabilities(fingerprints))):
-            check.match_probability = max(check.match_probability, probability)
-            if probability >= fingerprint.MIN_MATCH_PROBABILITY:
-                matched = (seed, words)
-                check.matched, check.rank = fp, check.checked - len(group) + i
-                break
-    if matched is None:
-        check.status = "mismatch"
-        reading.mark_fingerprint_mismatch()
-        reading.fingerprint = check
-        return reading
-    seed, words = matched
-    check.status = "verified"
-    verified = SeedReading(reading.kind, [WordReading(w.image, [(word, 0.0)], w.abbreviated & {word})
-                                             for word, w in zip(seed, words)],
-                           reading.min_seed_probability)
-    verified.fingerprint_crop = reading.fingerprint_crop
-    verified.fingerprint_others = list(getattr(reading, "fingerprint_others", []))
-    verified.fingerprint = check
-    verified.verified = True
-    verified.numbered = reading.numbered
-    return verified
+        i = match_fingerprints(check, group, progress)
+        if i is not None:
+            matched = group[i]
+    if matched is not None:
+        check.status = "verified"
+        return pending.verified_reading(matched[0], matched[1])
+    if now is not None and later and budget.left:
+        budget.pending.append(pending)
+    check.status = "mismatch"
+    reading.mark_fingerprint_mismatch()
+    reading.fingerprint = check
+    return reading
 
 
+
+def resolve_fingerprints(budget: FingerprintBudget, progress: Progress):
+    """
+        Compares the pending candidates of `budget` (see FingerprintBudget)
+        within what is left of it: those of a single check in its order (as
+        if compared when it was made), those of several checks the most
+        probable first (log-probability of their words). Returns the reading
+        verified by the first one that matches, or None.
+    """
+    entries = [(-log_p, n, j, pending, (seed, words))
+               for n, pending in enumerate(budget.pending)
+               for j, (seed, words, log_p) in enumerate(pending.candidates)]
+    if len(budget.pending) > 1:
+        entries.sort(key=lambda e: e[:3])
+    chosen = []
+    for e in entries:
+        key = (tuple(e[4][0]), e[3].line)
+        if key not in budget.compared and len(chosen) < budget.left:
+            budget.compared.add(key)
+            chosen.append(e)
+    budget.left -= len(chosen)
+    budget.pending = []
+    if not chosen:
+        return None
+    progress.expect(len(chosen) * FINGERPRINT_COST)
+    first = None
+    for pending in dict.fromkeys(e[3] for e in chosen):
+        group = [e for e in chosen if e[3] is pending]
+        i = match_fingerprints(pending.check, [e[4] for e in group], progress)
+        if i is not None and (first is None or chosen.index(group[i]) < chosen.index(first)):
+            first = group[i]
+    if first is None:
+        return None
+    pending = first[3]
+    pending.check.status = "verified"
+    return pending.verified_reading(*first[4])

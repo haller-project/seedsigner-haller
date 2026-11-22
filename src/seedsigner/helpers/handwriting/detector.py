@@ -76,9 +76,6 @@ CARD_MIN_COMPACTNESS = 0.55   # share of its oriented bounding rectangle covered
 NUMBER_CHECK = True           # numbers read that contradict the order of the words make the list incoherent
                               # (find_words: layout.numbers_incoherent)
 NUMBER_SURE = 0.9             # probability of the value of a number read taken into account by that check
-EXTRA_LINES_ANY = False       # (variant, off) rows of a list tried as a label or a fingerprint (layout.extra_lines)
-                              # also when words are left out of the lines; off: only when every word box is on a line,
-                              # as since 986e493 (task-4434: no seed gained on the benches, up to +88 s on the Pi)
 BEYOND_TEXT = 0.3             # writing of a card farther than this many word heights beyond its text: card cut there
 ZOOM_SHARE = 0.5              # documents covering less of the photo are detected again on their region (0.4 before
                               # the detector of 21/11/2026)
@@ -134,6 +131,12 @@ FINGERPRINT_CROPS = (CROP_VARIANTS[0], (0.6, 0.6, 0.5))
 # longer), the longest ones first, at most this many
 FINGERPRINT_MIN_LENGTH = 2.0
 FINGERPRINT_MAX_LINES = 3
+FINGERPRINT_TAIL = True       # the last piece of the first or last line of a column, far from the word, is tried as the
+                              # fingerprint (« 12. GUARD 2cd9b02c », find_words)
+TAIL_GAP = 1.5                # heights between the word and that piece, at least
+FINGERPRINT_OPTIONAL_ANY = True  # with a valid count and no line passing the fingerprint thresholds, the one line outside
+                              # the words (or tail) passing the loose margin is checked, the list kept if it matches no
+                              # seed (layout.fingerprint_optional; before: rows across the columns only)
 # A word box whose background (OFF_SHEET_PERCENTILE of the gray levels of its crop) is darker than OFF_SHEET times
 # the median background of the words of its document is off the sheet, left out when the count is wrong (real photos
 # of the Pi, 21/11/2026: phantom words on the dark table below the sheet at 0.02 to 0.11, words on paper at 0.79 or more)
@@ -1674,9 +1677,9 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         end that read as a fingerprint, a label or no word (see
         extra_line_sets and the second part below); WordsNotFound if no such
         set of rows is found. `layout.extra_lines` (without `extra`): a list
-        numbered on most of its lines, with a valid count, some of whose lines
-        have no number while such a set of rows exists: worth reading with
-        `extra` (handwriting.read_seed).
+        numbered on most of its lines, with a valid count, every word box on
+        one of its lines, some of whose lines have no number while such a set
+        of rows exists: worth reading with `extra` (handwriting.read_seed).
         `layout.numbers_incoherent`: numbers read and linked to their line that
         contradict every order of the words left (see NUMBER_CHECK). With
         `merged`, the card kernels are ignored: every word is on one list (a
@@ -1956,28 +1959,73 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
                 if fingerprint(crop):
                     accepted.append((line, crop))
                     break
+        # a fingerprint written on the row of the first or last word of a column, after it (« 12. GUARD 2cd9b02c »):
+        # the last piece of that line, more than TAIL_GAP heights after the piece before it, is tried as the fingerprint;
+        # taken, it is cut off the line (tails: (line, piece, end of the word))
+        tails = []
+        if FINGERPRINT_TAIL and not accepted:
+            ends = {id(b): b for column in columns for b in (column[0], column[-1])}
+            for line in ends.values():
+                pieces = sorted((b for b in groups[g] if covers(line, b.center)), key=lambda b: b.a0)
+                if len(pieces) < 2:
+                    continue
+                last, before = pieces[-1], pieces[-2]
+                if last.a0 - before.a1 < TAIL_GAP * h or last.a1 - last.a0 < FINGERPRINT_MIN_LENGTH * h:
+                    continue
+                tail = copy_box(last)
+                tail.a1 = max(tail.a1, line.a1)
+                tails.append((line, tail, before.a1))
+            for line, tail, _ in tails:
+                for margins in FINGERPRINT_CROPS:
+                    crop = rectified_crop(image, det.to_photo(tail.quad(margins)), fill)
+                    if fingerprint(crop):
+                        accepted.append((tail, crop))
+                        break
         margin_of = getattr(fingerprint, "margin", None)
         optional = False
-        if not accepted and bridged_rows and margin_of is not None:
-            # a row left out across the columns (bridged_columns) read best as 8 hexadecimal digits by the fingerprint
-            # network: checked as the fingerprint, the list kept as read if it matches no seed (layout.fingerprint_optional)
+        loose_line = None
+        if not accepted and margin_of is not None and (bridged_rows or FINGERPRINT_OPTIONAL_ANY):
+            # a row left out across the columns (bridged_columns), or else (FINGERPRINT_OPTIONAL_ANY) any line outside
+            # the words or tail, read best as 8 hexadecimal digits by the fingerprint network: checked as the
+            # fingerprint, the list kept as read if it matches no seed (layout.fingerprint_optional); exactly one must
+            # pass the loose margin (one check per search, as on the other paths)
             passing = []
-            for line in tried:
-                if any(covers(line, b.center) for row in bridged_rows for b in row):
-                    wide = with_number(line, det.numbers, after=True)
-                    for box, margins in itertools.product([wide] * (wide is not None) + [line], FINGERPRINT_CROPS):
-                        crop = rectified_crop(image, det.to_photo(box.quad(margins)), fill)
-                        if margin_of(crop) is not None:
-                            passing.append((line, crop))
-                            break
+            if bridged_rows:
+                for line in tried:
+                    if any(covers(line, b.center) for row in bridged_rows for b in row):
+                        wide = with_number(line, det.numbers, after=True)
+                        for box, margins in itertools.product([wide] * (wide is not None) + [line], FINGERPRINT_CROPS):
+                            crop = rectified_crop(image, det.to_photo(box.quad(margins)), fill)
+                            if margin_of(crop) is not None:
+                                passing.append((line, crop))
+                                break
+            else:
+                # one crop of one line, at the cost of one pass of the fingerprint network: the tail if there is one,
+                # else the longest line outside the words
+                line = tails[0][1] if tails else (tried[0] if tried else None)
+                if line is not None:
+                    crop = rectified_crop(image, det.to_photo(line.quad(FINGERPRINT_CROPS[0])), fill)
+                    if margin_of(crop) is not None:
+                        passing.append((line, crop))
+                        loose_line = line
             if len(passing) == 1:
                 accepted, optional = passing, True
         if len(accepted) == 1:
             spare_line, spare = accepted[0]
+            for line, tail, end in tails:
+                if tail is spare_line:
+                    # the word alone on its line, a quarter of a height after its last piece
+                    line.a1 = min(line.a1, end + 0.25 * line.h)
+                    if hasattr(line, "ink"):
+                        line.ink = min(line.ink, line.a1 - line.a0)
     else:
         optional = False
+        loose_line = None
+    # a line checked as an optional fingerprint outside the rows across the columns stays a word left out until its
+    # fingerprint matches (the guard against a word left out of the list then applies)
+    kept_out = [spare_line] if spare_line is not None and spare_line is not loose_line else []
     words_left = [(b.score, (b.a1 - b.a0) / b.h, det.card_of(b.center) != g) for b in det.words
-             if not any(covers(line, b.center) for line in lines + ([spare_line] if spare_line else []) + removed_lines)]
+             if not any(covers(line, b.center) for line in lines + kept_out + removed_lines)]
     numbers = number_groups.get(g, [])
     linked = anchored["numbers"] if anchored else link_numbers(det, lines, numbers)
     quads = [[det.to_photo(b.quad(m)) for b in lines] for m in CROP_VARIANTS]
@@ -2068,8 +2116,13 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     layout.fingerprint_others = others
     layout.fingerprint_hypothesis = hypothesis
     layout.fingerprint_optional = optional
-    # (EXTRA_LINES_ANY False: as before, only when every word box is on a line)
-    layout.extra_lines = (not extra if EXTRA_LINES_ANY else not words_left) and g < 0 and anchored is None and spare is None and fingerprint is not None \
+    layout.fingerprint_single = optional and loose_line is not None
+    # The second reading without label or fingerprint rows (read_seed, `extra`) is offered only when every word box is
+    # on a line of the list: a word left out (a title, words of another document) closes it. This was the behaviour
+    # since 986e493, through a variable `extra` reused for the words left out; written out here. Offering it also when
+    # words are left out (task-4434, C6) gained no seed on the frozen benches and cost up to 88 s more on a Pi Zero
+    # (a photo already read, read again for nothing).
+    layout.extra_lines = not words_left and g < 0 and anchored is None and spare is None and fingerprint is not None \
         and len(linked) >= MIN_ANCHOR_NUMBERS and len(linked) < count and bool(extra_line_sets(groups[g]))
     layout.extra_lines_removed = len(removed_lines)
     layout.extra_lines_strong = strong

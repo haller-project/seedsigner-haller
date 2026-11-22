@@ -419,6 +419,20 @@ def log_softmax(scores: np.ndarray) -> np.ndarray:
 WORD_CACHE = True
 _crop_cache = {}   # key of a crop: ink map or None
 _score_cache = {}  # (key, model): (outputs of the network, word scores)
+_fingerprint_cache = {}  # key of a crop: outputs of the fingerprint network
+
+
+def fingerprint_log_probs(crop: Image.Image, ink: np.ndarray) -> np.ndarray:
+    """
+        Outputs of the fingerprint network on `ink`, the ink map of `crop`,
+        computed once per crop during a reading (WORD_CACHE).
+    """
+    if not WORD_CACHE:
+        return fingerprint_network().log_probs(ink)
+    key = crop_key(crop)
+    if key not in _fingerprint_cache:
+        _fingerprint_cache[key] = fingerprint_network().log_probs(ink)
+    return _fingerprint_cache[key]
 
 
 def crop_key(crop: Image.Image) -> bytes:
@@ -732,7 +746,7 @@ def fingerprint_hypothesis_margin(crop: Image.Image) -> float | None:
     if ink is None:
         return None
     _, decoder, _ = load_engine()
-    log_probs = fingerprint_network().log_probs(ink)
+    log_probs = fingerprint_log_probs(crop, ink)
     margin, fit = fingerprint.margins(log_probs, decoder.scores(log_probs))
     return margin if margin >= LOOSE_FINGERPRINT_MARGIN and fit >= FINGERPRINT_FIT else None
 
@@ -870,6 +884,7 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
     detector._detections.clear()
     _crop_cache.clear()
     _score_cache.clear()
+    _fingerprint_cache.clear()
 
     def spare_line(crop):
         progress.step(WORD_COST + OTHER_WORD_COST)
@@ -945,7 +960,10 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
         if reading.fingerprint_crop is not None and getattr(reading.layout, "fingerprint_optional", False):
             # a row left out across the columns tried as the fingerprint: kept only if it matches a seed read
             doubtful = set(reading.doubtful)
-            checked = check_fingerprint(reading, pool, progress)
+            # a single line outside the rows across the columns (detector.FINGERPRINT_OPTIONAL_ANY): read on its crop
+            # only, whose outputs were computed for the loose margin
+            checked = check_fingerprint(reading, pool, progress,
+                                        trim=not getattr(reading.layout, "fingerprint_single", False))
             if getattr(checked, "verified", False):
                 reading = checked
             else:
@@ -979,6 +997,7 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
         detector._detections.clear()
         _crop_cache.clear()
         _score_cache.clear()
+        _fingerprint_cache.clear()
     if reading is None:
         raise not_found
     progress.report(1.0)
@@ -986,26 +1005,28 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
 
 
 
-def check_fingerprint(reading: SeedReading, pool: list, progress: Progress) -> SeedReading:
+def check_fingerprint(reading: SeedReading, pool: list, progress: Progress, trim: bool = True) -> SeedReading:
     """
         Checks the fingerprint line of `reading`, read by the fingerprint
         network (see FINGERPRINT_CANDIDATES)
         against the candidate seeds of `pool` (see read_layout), most probable
         first. Returns the reading of the matching seed, every word certain
         (`verified`), or `reading` with every word uncertain; the check is in
-        `fingerprint` of the reading returned.
+        `fingerprint` of the reading returned. Without `trim`, the line is
+        read on its crop only (not also with FINGERPRINT_TRIM off its top and
+        bottom).
     """
     crops = []
     for crop in [reading.fingerprint_crop] + list(getattr(reading, "fingerprint_others", [])):
         # two fingerprint lines (with and without a passphrase): the mean of their probabilities also sums to 1
         w, h = crop.size
-        trim = round(FINGERPRINT_TRIM * h)
-        crops += [crop] + ([crop.crop((0, trim, w, h)), crop.crop((0, 0, w, h - trim))] if trim else [])
-    inks = [ink for ink in (normalize_word(c) for c in crops) if ink is not None]
+        cut = round(FINGERPRINT_TRIM * h) if trim else 0
+        crops += [crop] + ([crop.crop((0, cut, w, h)), crop.crop((0, 0, w, h - cut))] if cut else [])
+    inks = [(c, ink) for c, ink in ((c, normalize_word(c)) for c in crops) if ink is not None]
     if not inks:
         return reading
-    check = fingerprint.FingerprintCheck([fingerprint.FingerprintReading(fingerprint_network().log_probs(ink))
-                                          for ink in inks])
+    check = fingerprint.FingerprintCheck([fingerprint.FingerprintReading(fingerprint_log_probs(c, ink))
+                                          for c, ink in inks])
     candidates, seen = [], set()
     for _, seed, words in sorted(pool, key=lambda item: item[0]):
         if tuple(seed) not in seen and len(candidates) < FINGERPRINT_CANDIDATES:

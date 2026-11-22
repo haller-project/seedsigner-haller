@@ -2119,6 +2119,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     layout.fingerprint_others = others
     layout.fingerprint_hypothesis = hypothesis
     layout.fingerprint_optional = optional
+    layout.fingerprint_single = optional and loose_line is not None
     # (EXTRA_LINES_ANY False: as before, only when every word box is on a line)
     layout.extra_lines = (not extra if EXTRA_LINES_ANY else not words_left) and g < 0 and anchored is None and spare is None and fingerprint is not None \
         and len(linked) >= MIN_ANCHOR_NUMBERS and len(linked) < count and bool(extra_line_sets(groups[g]))

@@ -12,6 +12,17 @@
 - A blank official card is read as 12 uncertain words instead of being
   rejected.
 - The reading cannot be cancelled once started.
+- Cursive and lowercase writing are read less well than capitals (115 test
+  photos: 21 of 37 lowercase and 6 of 20 neat cursive seeds exact, against
+  41 of 54 in capitals).
+- Part of a plain sheet can be taken for a seed card (a card kernel found on
+  a few words): its words are then read as another document and every word is
+  uncertain. A rule on the shape of the kernel was measured and left off: it
+  freed the words of real cards cut by the frame of the photo.
+- Two bands of words without line numbers whose order stays ambiguous get the
+  low trust level: every word is to be compared.
+- Words abbreviated to 4 letters are read less well than full words (108 of
+  400 abbreviated test pages exact).
 
 
 SeedSigner can load a seed from a photo of its handwritten words: the official
@@ -472,7 +483,8 @@ bytes).
   most 1 428 strings reach it: the fingerprint of a wrong seed, uniform over
   2^32 values, matches by chance with a probability of at most 3.3e-7 per
   seed checked, whatever the calibration of the networks. A photo gets a
-  wrong verified seed with a probability of at most 3 × 3.3e-7 = 1e-6,
+  wrong verified seed with a probability of at most 3 × 3.33e-7 = 9.98e-7
+  (under 1e-6),
   because at most 3 (seed, line) pairs are compared over its whole reading
   (`FingerprintBudget`), not 3 per search: a reading neither verified nor
   valid is searched a second time without the words that may be crossed out,
@@ -705,8 +717,52 @@ vectors.
 
 ## Accuracy
 
-Engine as shipped (word detector alone, fingerprint check, trust gauge),
-measured on 21/11/2026 against the previous engine (rules of `page.py`, the
+Engine of this branch as published with Haller-1 (benches of 22/11/2026, on
+the code of `detector-prod` 978f1fa, whose comments only differ): word
+detector alone, fingerprint check, trust gauge and the changes described in
+the sections above. Seeds verified by their fingerprint (wrong ones) / seeds
+exact / words read correctly / pages not found:
+
+| Photos | Kind | Result |
+|---|---|---|
+| Real photos, test half (35) | test | 0 (0) / 30 / 485 / 1 |
+| Blank cards of other makers photographed, writing simulated (70) | test | 0 (0) / 34 / 716 / 12 |
+| Hard real photos taken by the device (10) | test | 4 (0) / 7 / 99 / 1 |
+| Usual simulated photos (1 560) | test | 0 (0) / 1 403 / 21 065 / 45 |
+| Badly framed (1 167) | test | 0 (0) / 641 / 11 699 / 176 |
+| Red team (845) | test | 0 (0) / 556 / 8 680 / 47 |
+| Supports kept apart (900) | test | 0 (0) / 277 / 6 446 / 272 |
+| Several columns (240) | test | 0 (0) / 45 / 1 044 / 114 |
+| Tight columns (200) | test | 0 (0) / 61 / 1 452 / 69 |
+| Lists with a fingerprint line (1 200) | test | 397 (0) / 963 / 16 177 / 78 |
+| Red team with a fingerprint line (838) | test | 478 (0) / 586 / 8 686 / 60 |
+| Numbered lists with a fingerprint line (800) | test | 564 (0) / 639 / 10 377 / 58 |
+| Traps around the fingerprint line (800) | test | 541 (0) / 578 / 8 154 / 130 |
+| Labels before the fingerprint (400) | test | 97 (0) / 121 / 1 628 / 254 |
+| Abbreviated words (400) | test | 0 (0) / 108 / 2 410 / 122 |
+| Real photos, development half (65) | tuning | 25 (0) / 53 / 771 / 2 |
+| Photos sent to the public test, before 2026-11-23 (81) | tuning | 10 (0) / 62 / 1 085 / 6 |
+| Simulated tuning pages (1 978) | tuning | 0 (0) / 792 / 16 753 / 419 |
+| Tuning lists with a fingerprint line (779) | tuning | 296 (0) / 608 / 9 885 / 42 |
+| Tuning labels (200) | tuning | 37 (0) / 44 / 592 / 143 |
+| Tuning abbreviated words (200) | tuning | 0 (0) / 62 / 1 465 / 50 |
+
+**0 wrong seeds among 2 449 verified** (2 081 on the test benches, 368 on the
+tuning ones); at most 3 seeds are compared with the fingerprint per photo, a
+wrong seed is verified by chance with a probability of at most 9.98e-7 per
+photo (see [Check of the fingerprint](#check-of-the-fingerprint)). The test
+benches were never used to choose a threshold or a rule; the real photos of
+the test half were looked at during development and serve as a
+non-regression set. The 359 simulated pages drawn upside down count as read
+wrong: the page is read as given. The 13 blank cards stored lying on their
+side are given to the engine upright, turned without loss.
+
+On a Raspberry Pi Zero, reading alone (the running application adds about
+5 %), the 17 real photos of the reference set (13 taken by the device) take
+5.9 to 55.2 s (median 13.6 s): 12-word cards 5.9 to 8.7 s, 12-word lists
+verified by their fingerprint 13.6 to 24.5 s, a list in three columns 55.2 s.
+
+Measured on 21/11/2026 against the previous engine (rules of `page.py`, the
 detector when they found no valid seed). Seeds verified by their fingerprint
 (wrong ones) / seeds exact (every word right, whatever the trust level) /
 words read correctly:
@@ -965,7 +1021,12 @@ float model, the activation ranges of the quantization and the content
 digests of the shards are in `recipes/haller-1-detector` of the Haller
 repository; the quantization from these ranges and the export give this file
 and its reference vectors byte for byte. The photos of blank supports and of
-cards are listed there by digest, to be published.
+cards are listed there by digest; they are published, under the MIT
+License, as datasets of the Haller-1 release, except eighteen photos that
+show identifiable printed matter and the card variants composed on them. The
+drawings, logos and trademarks of the third-party cards shown in these
+photos remain the property of their holders and are not covered by the MIT
+License.
 
 They are produced, from scratch and reproducibly, by the separate
 [Haller](https://github.com/haller-project/haller) repository (tag
@@ -1038,3 +1099,9 @@ Training data of these weights:
   to retake the photo.
 - The page must be upright in the photo (slants and perspective are followed);
   a page upside down or turned a quarter turn is not read.
+- Only a seed whose fingerprint, written with the words, is read and matches
+  them is announced as verified. Every other reading, whatever its trust
+  level, has to be compared word by word with the paper: pages built to make
+  the checksum and the networks agree on a wrong seed (column order,
+  truncated words, look-alike words) can still give a wrong seed at the high
+  trust level.

@@ -285,6 +285,48 @@ label and not verified is trusted low. A list not found is not read again
 this way: measured on a Pi Zero, it took 26 to 93 s on pages refused
 without it in 4.5 to 33.5 s.
 
+### Ink of the rows, empty numbered slots, rows across the columns
+
+Three rules of the layout complete what the detector gives (`detector.py`):
+
+- **Lines extended by the ink of their row** (`InkReach`, `ink_extend`): a
+  line whose word map stops before the end of its strokes (« RESULT » boxed
+  as « SULT ») is extended on either side, up to `INK_REACH` heights, over
+  the strokes of a strip of the photo along its center line: pixels darker
+  than half the way from the background to the ink of the line itself
+  (`INK_LEVEL`), gaps between strokes of at most `INK_GAP` heights
+  (`INK_DIGIT_GAP` for a line tried as the fingerprint), ruled or printed
+  lines and the dark edges of the sheet left out (`INK_RULE`, `INK_DARK`).
+  A side is extended only if it grows by half a height or more, if the
+  strokes keep the height of the line (`INK_SHIFT`), and, in a column of
+  aligned lines, if the line does not start more than half a height before
+  the others (`INK_ALIGN`, `INK_MIN_LEAD`).
+- **Empty numbered slots holding strokes** (`InkReach.slot`): on a numbered
+  card or list whose slots are anchored on the numbers, a slot with no word
+  box is taken as written when its central band holds at least one height
+  of strokes (`INK_MIN_WORD`), only when the lines alone give no valid
+  number of words, when the count becomes valid with these slots, and never
+  in the second search (crossed-out words). Its word stays uncertain.
+- **A row across the columns** (`bridged_columns`): one or two rows at the
+  start or end of the list (a title, a fingerprint) that overlap the
+  corridor between two columns and close it (`group_lines` would then merge
+  the columns) are left out of the words, if the rest forms two columns or
+  more (or a grid) of a valid number of words. This is done when the count
+  is wrong, or when it is valid but the reading without these rows gives
+  more columns; never in the second search. The rows left out go through the
+  usual search of the fingerprint; failing a fingerprint at the strict
+  thresholds, one passing the loose threshold is checked against the seeds
+  read, and the list is not refused if it matches none
+  (`layout.fingerprint_optional`).
+
+Measured on 18 benches (11 383 simulated and real pages; 22/11/2026): 220
+more exact seeds and 208 more verified seeds; on the tuning bench of the
+fingerprint (779 pages), 28 and 34 more; no false verified seed, no loss
+above 1 % of exact seeds for any writing or support. The rows
+across the columns bring most of the gain (fingerprints written under or
+above a list in columns). On a Pi Zero the ink strips add about 1.5 s per
+photo; a few pages refused before and now read take 40 to 50 s more.
+
 ### Check of the fingerprint
 
 When a fingerprint line was left out, it is read again by the fingerprint

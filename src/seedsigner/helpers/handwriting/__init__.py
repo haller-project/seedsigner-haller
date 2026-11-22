@@ -861,11 +861,10 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             return detector.find_words(image, step, fingerprint=fingerprint, crossed=crossed)
 
         reading, _, not_found = search(find, gray, progress, on_word, pool, spare_line)
-        if not crossed and (reading is None and not_found.line_count
-                            or reading is not None and getattr(reading.layout, "extra_lines", False)
+        if not crossed and (reading is not None and getattr(reading.layout, "extra_lines", False)
                             and reading.fingerprint_crop is None and not getattr(reading, "verified", False)):
-            # a list not found, or numbered with lines without a number: read again without one or two rows at its
-            # start or end that read as a fingerprint or a label (detector.extra_line_sets); one fingerprint check
+            # a list numbered on most of its lines, with lines without a number: read again without one or two rows
+            # at its start or end that read as a fingerprint or a label (detector.extra_line_sets); one fingerprint check
             # at most per attempt, as on the other paths (none was made here)
             extra_pool = []
 

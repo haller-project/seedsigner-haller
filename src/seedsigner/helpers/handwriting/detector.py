@@ -1986,28 +1986,31 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
                         break
         margin_of = getattr(fingerprint, "margin", None)
         optional = False
+        loose_line = None
         if not accepted and margin_of is not None and (bridged_rows or FINGERPRINT_OPTIONAL_ANY):
             # a row left out across the columns (bridged_columns), or else (FINGERPRINT_OPTIONAL_ANY) any line outside
             # the words or tail, read best as 8 hexadecimal digits by the fingerprint network: checked as the
             # fingerprint, the list kept as read if it matches no seed (layout.fingerprint_optional); exactly one must
             # pass the loose margin (one check per search, as on the other paths)
             passing = []
-            candidates = [line for line in tried if not bridged_rows
-                          or any(covers(line, b.center) for row in bridged_rows for b in row)]
-            for line in candidates:
-                wide = with_number(line, det.numbers, after=True)
-                for box, margins in itertools.product([wide] * (wide is not None) + [line], FINGERPRINT_CROPS):
-                    crop = rectified_crop(image, det.to_photo(box.quad(margins)), fill)
+            if bridged_rows:
+                for line in tried:
+                    if any(covers(line, b.center) for row in bridged_rows for b in row):
+                        wide = with_number(line, det.numbers, after=True)
+                        for box, margins in itertools.product([wide] * (wide is not None) + [line], FINGERPRINT_CROPS):
+                            crop = rectified_crop(image, det.to_photo(box.quad(margins)), fill)
+                            if margin_of(crop) is not None:
+                                passing.append((line, crop))
+                                break
+            else:
+                # one crop of one line, at the cost of one pass of the fingerprint network: the tail if there is one,
+                # else the longest line outside the words
+                line = tails[0][1] if tails else (tried[0] if tried else None)
+                if line is not None:
+                    crop = rectified_crop(image, det.to_photo(line.quad(FINGERPRINT_CROPS[0])), fill)
                     if margin_of(crop) is not None:
                         passing.append((line, crop))
-                        break
-            if not bridged_rows:
-                for line, tail, _ in tails:
-                    for margins in FINGERPRINT_CROPS:
-                        crop = rectified_crop(image, det.to_photo(tail.quad(margins)), fill)
-                        if margin_of(crop) is not None:
-                            passing.append((tail, crop))
-                            break
+                        loose_line = line
             if len(passing) == 1:
                 accepted, optional = passing, True
         if len(accepted) == 1:
@@ -2020,8 +2023,12 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
                         line.ink = min(line.ink, line.a1 - line.a0)
     else:
         optional = False
+        loose_line = None
+    # a line checked as an optional fingerprint outside the rows across the columns stays a word left out until its
+    # fingerprint matches (the guard against a word left out of the list then applies)
+    kept_out = [spare_line] if spare_line is not None and spare_line is not loose_line else []
     words_left = [(b.score, (b.a1 - b.a0) / b.h, det.card_of(b.center) != g) for b in det.words
-             if not any(covers(line, b.center) for line in lines + ([spare_line] if spare_line else []) + removed_lines)]
+             if not any(covers(line, b.center) for line in lines + kept_out + removed_lines)]
     numbers = number_groups.get(g, [])
     linked = anchored["numbers"] if anchored else link_numbers(det, lines, numbers)
     quads = [[det.to_photo(b.quad(m)) for b in lines] for m in CROP_VARIANTS]

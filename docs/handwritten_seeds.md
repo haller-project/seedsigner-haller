@@ -208,8 +208,10 @@ puts no box on printed text. Then `detector.find_words`:
    the nearest free slot, after the drift of the words from the lines of their
    numbers (perspective, height of the writing) is taken out; a word box that
    spans two numbered lines is shared between them;
-4. tells the direction of reading by the numbers (before or after the words),
-   otherwise reads the words both ways;
+4. reads the page upright, as given: the photo is turned by its EXIF
+   orientation only, small slants and perspective are followed by the boxes;
+   a page upside down or turned a quarter turn is not read (no wrong reading:
+   « not found »);
 5. takes the order of the words from the numbers read when they tell it,
    otherwise from the columns and rows; when both orders of two columns pass
    the checksum, no word is certain;
@@ -651,6 +653,17 @@ For Haller-1, the float models, the evaluation strips and the commands that
 write these vectors again byte for byte are in `recipes/haller-1` of the
 Haller repository.
 
+### Regression cases
+
+`tests/handwriting_regression/` holds one synthetic page per fix of the
+harness and per safety trap, with the reading expected (`cases.json`, see its
+`README.md`): every page fails with the engine before its fix and passes with
+the fix. `tests/test_handwriting_regression.py` reads them all (about 30 s);
+a case still waiting for its fix is an expected failure. Safety cases check
+that a reading is never verified, nor valid, when it is wrong, and that at
+most 3 seeds are compared with a fingerprint line per photo. Every new fix
+adds its case in the same change.
+
 ### Tests in the CI (proposal)
 
 The engine tests that need numpy (`tests/test_handwriting_core.py`: page
@@ -997,3 +1010,5 @@ Training data of these weights:
   only, like the frames of a SeedQR scan, and has no network.
 - Blurry photos, very small writing and unusual layouts fail; the user is asked
   to retake the photo.
+- The page must be upright in the photo (slants and perspective are followed);
+  a page upside down or turned a quarter turn is not read.

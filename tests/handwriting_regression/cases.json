@@ -1,0 +1,1116 @@
+{
+ "description": "Haller-1 regression cases: one synthetic page per fix (twin of the private real photo that led to it) or per safety trap, with the reading expected. See README.md.",
+ "cases": [
+  {
+   "id": "s-c1-encre-1col",
+   "fix": "C1 (067bff4)",
+   "source": "synthetic",
+   "image": "images/s-c1-encre-1col.jpg",
+   "rotation": 0,
+   "mechanism": "Words only partly covered by the word map: without the ink extension, list not found.",
+   "level": "regression",
+   "state": "active",
+   "style": "minuscules",
+   "generation": {
+    "tool": "train/redteam/gen_rt.py simple --empreinte 1 --numeros 1 --position bas",
+    "seed": 45101,
+    "index": 103
+   },
+   "expected": {
+    "words": [
+     "firm",
+     "giraffe",
+     "raise",
+     "punch",
+     "primary",
+     "tomato",
+     "tribe",
+     "detail",
+     "turkey",
+     "hole",
+     "mobile",
+     "accuse"
+    ],
+    "never_false_sure": true
+   },
+   "before": "0f4dbf3",
+   "twin_of": "r-c1-dinosaur"
+  },
+  {
+   "id": "s-c1-encre-introuvable",
+   "fix": "C1 (067bff4)",
+   "source": "synthetic",
+   "image": "images/s-c1-encre-introuvable.jpg",
+   "rotation": 0,
+   "mechanism": "A word cut short by the detector: list not found; with the ink of its row, read and verified.",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/redteam/gen_rt.py simple --empreinte 1 --numeros 1 --position bas",
+    "seed": 45101,
+    "index": 52
+   },
+   "expected": {
+    "words": [
+     "gauge",
+     "chat",
+     "mango",
+     "stem",
+     "door",
+     "absurd",
+     "history",
+     "matter",
+     "illness",
+     "real",
+     "hurdle",
+     "shine",
+     "foam",
+     "best",
+     "problem",
+     "quality",
+     "treat",
+     "robust",
+     "soul",
+     "client",
+     "judge",
+     "youth",
+     "license",
+     "scale"
+    ],
+    "never_false_sure": true,
+    "verified": true,
+    "status": "valid",
+    "fingerprint": "e0da1ffc"
+   },
+   "before": "0f4dbf3",
+   "twin_of": "r-c1-alarm"
+  },
+  {
+   "id": "s-c3-empreinte-sous-2col",
+   "fix": "C3 (067bff4)",
+   "source": "synthetic",
+   "image": "images/s-c3-empreinte-sous-2col.jpg",
+   "rotation": 0,
+   "mechanism": "Fingerprint under two columns, closing the corridor between them: columns merged, 12 lines instead of 24.",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/redteam/gen_rt.py simple --empreinte 1 --numeros 1 --position bas",
+    "seed": 45101,
+    "index": 17
+   },
+   "expected": {
+    "words": [
+     "smooth",
+     "faith",
+     "erupt",
+     "blouse",
+     "weapon",
+     "more",
+     "worry",
+     "gauge",
+     "crater",
+     "copper",
+     "crop",
+     "chicken",
+     "assault",
+     "decline",
+     "suffer",
+     "property",
+     "estate",
+     "alley",
+     "effort",
+     "close",
+     "shift",
+     "leaf",
+     "execute",
+     "uncle"
+    ],
+    "never_false_sure": true,
+    "verified": true,
+    "status": "valid",
+    "fingerprint": "edf0b431"
+   },
+   "before": "0f4dbf3",
+   "twin_of": "r-c3-empreinte-titre"
+  },
+  {
+   "id": "s-c3-empreinte-sous-2col-min",
+   "fix": "C3 (067bff4)",
+   "source": "synthetic",
+   "image": "images/s-c3-empreinte-sous-2col-min.jpg",
+   "rotation": 0,
+   "mechanism": "Same, in lowercase.",
+   "level": "regression",
+   "state": "active",
+   "style": "minuscules",
+   "generation": {
+    "tool": "train/redteam/gen_rt.py simple --empreinte 1 --numeros 1 --position bas --style font",
+    "seed": 45113,
+    "index": 3
+   },
+   "expected": {
+    "words": [
+     "situate",
+     "oven",
+     "quick",
+     "cave",
+     "unit",
+     "horse",
+     "december",
+     "vote",
+     "enact",
+     "dog",
+     "shrug",
+     "capable",
+     "announce",
+     "resist",
+     "term",
+     "provide",
+     "spy",
+     "buffalo",
+     "type",
+     "exist",
+     "opinion",
+     "pelican",
+     "gaze",
+     "detail"
+    ],
+    "never_false_sure": true,
+    "verified": true,
+    "status": "valid",
+    "fingerprint": "2279edcb"
+   },
+   "before": "0f4dbf3",
+   "twin_of": "r-c3-empreinte-titre"
+  },
+  {
+   "id": "s-f5-empreinte-souple",
+   "fix": "C9 (2c2a509)",
+   "source": "synthetic",
+   "image": "images/s-f5-empreinte-souple.jpg",
+   "rotation": 0,
+   "mechanism": "Fingerprint under the list below the strict margin, valid count: right seed left unverified without the optional check.",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/redteam/gen_rt.py simple --empreinte 1 --numeros 1 --position bas",
+    "seed": 45101,
+    "index": 0
+   },
+   "expected": {
+    "words": [
+     "raccoon",
+     "imitate",
+     "kangaroo",
+     "stadium",
+     "kiwi",
+     "uncover",
+     "echo",
+     "whip",
+     "mountain",
+     "arctic",
+     "hair",
+     "want",
+     "arrest",
+     "discover",
+     "trigger",
+     "consider",
+     "milk",
+     "author",
+     "pigeon",
+     "shoulder",
+     "wish",
+     "cruel",
+     "crazy",
+     "grab"
+    ],
+    "never_false_sure": true,
+    "verified": true,
+    "status": "valid",
+    "fingerprint": "025b921e"
+   },
+   "before": "a7dfd23",
+   "twin_of": "r-f5-empreinte-crayon"
+  },
+  {
+   "id": "s-rt-ordre-sans-numeros",
+   "fix": "order guard and fingerprint",
+   "source": "synthetic",
+   "image": "images/s-rt-ordre-sans-numeros.jpg",
+   "rotation": 0,
+   "mechanism": "Red team: two columns written row by row, no numbers; reading column by column is a valid seed too. Only the fingerprint tells them apart.",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/redteam/gen_rt.py ordre --empreinte 1",
+    "seed": 45105,
+    "index": 7
+   },
+   "expected": {
+    "words": [
+     "chase",
+     "craft",
+     "connect",
+     "say",
+     "play",
+     "anger",
+     "planet",
+     "force",
+     "hurry",
+     "spare",
+     "high",
+     "matrix"
+    ],
+    "never_false_sure": true,
+    "verified": true,
+    "status": "valid",
+    "fingerprint": "3d2d181d"
+   }
+  },
+  {
+   "id": "s-rt-tronc",
+   "fix": "red team, truncations",
+   "source": "synthetic",
+   "image": "images/s-rt-tronc.jpg",
+   "rotation": 0,
+   "mechanism": "Red team: pale first letters (illegal/legal, replace/place, boil/oil), a valid wrong seed built in.",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/redteam/gen_rt.py tronc --empreinte 1 --paires tronc.json",
+    "seed": 45106,
+    "index": 14
+   },
+   "expected": {
+    "words": [
+     "office",
+     "enable",
+     "candy",
+     "scheme",
+     "connect",
+     "view",
+     "bonus",
+     "primary",
+     "wear",
+     "elder",
+     "decorate",
+     "junior"
+    ],
+    "never_false_sure": true,
+    "verified": true,
+    "status": "valid",
+    "fingerprint": "96e60f80"
+   }
+  },
+  {
+   "id": "s-rt-jumeaux",
+   "fix": "red team, look-alike words",
+   "source": "synthetic",
+   "image": "images/s-rt-jumeaux.jpg",
+   "rotation": 0,
+   "mechanism": "Red team: three words each replaceable by a look-alike giving a valid seed (rival/final, party/north, speed/spend).",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/redteam/gen_rt.py jumeaux --empreinte 1 --paires jumeaux.json",
+    "seed": 45107,
+    "index": 0
+   },
+   "expected": {
+    "words": [
+     "sentence",
+     "hard",
+     "found",
+     "fall",
+     "youth",
+     "bring",
+     "regret",
+     "bright",
+     "choose",
+     "eyebrow",
+     "web",
+     "february"
+    ],
+    "never_false_sure": true,
+    "verified": true,
+    "status": "valid",
+    "fingerprint": "6f19468b"
+   }
+  },
+  {
+   "id": "s-pieges-suite-12",
+   "fix": "fingerprint traps",
+   "source": "synthetic",
+   "image": "images/s-pieges-suite-12.jpg",
+   "rotation": 0,
+   "mechanism": "Numbered list of 12 words, fingerprint below starting with 13 (continuing the numbers).",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/redteam/gen_pieges.py",
+    "seed": 45103,
+    "index": 1
+   },
+   "expected": {
+    "words": [
+     "harbor",
+     "quiz",
+     "green",
+     "swim",
+     "gold",
+     "argue",
+     "pottery",
+     "illness",
+     "ethics",
+     "crop",
+     "salon",
+     "evil"
+    ],
+    "never_false_sure": true,
+    "verified": true,
+    "status": "valid",
+    "fingerprint": "13b29b79"
+   }
+  },
+  {
+   "id": "s-pieges-deux-fp",
+   "fix": "fingerprint traps",
+   "source": "synthetic",
+   "image": "images/s-pieges-deux-fp.jpg",
+   "rotation": 0,
+   "mechanism": "Two fingerprints, without and with a passphrase.",
+   "level": "regression",
+   "state": "active",
+   "style": "minuscules",
+   "generation": {
+    "tool": "train/redteam/gen_pieges.py --variante deux_fp",
+    "seed": 45110,
+    "index": 56
+   },
+   "expected": {
+    "words": [
+     "medal",
+     "patch",
+     "device",
+     "smile",
+     "right",
+     "tiny",
+     "leopard",
+     "shoulder",
+     "whisper",
+     "bird",
+     "wrist",
+     "diet"
+    ],
+    "never_false_sure": true,
+    "verified": true,
+    "status": "valid",
+    "fingerprint": "079e0240"
+   }
+  },
+  {
+   "id": "s-pieges-mot-hex",
+   "fix": "fingerprint traps",
+   "source": "synthetic",
+   "image": "images/s-pieges-mot-hex.jpg",
+   "rotation": 0,
+   "mechanism": "Fingerprint holding a BIP39 word made of the letters a-f.",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/redteam/gen_pieges.py",
+    "seed": 45103,
+    "index": 6
+   },
+   "expected": {
+    "words": [
+     "wine",
+     "stumble",
+     "buffalo",
+     "exercise",
+     "parent",
+     "repeat",
+     "shallow",
+     "sail",
+     "reform",
+     "diet",
+     "recycle",
+     "unaware"
+    ],
+    "never_false_sure": true,
+    "verified": true,
+    "status": "valid",
+    "fingerprint": "ab6fade3"
+   }
+  },
+  {
+   "id": "s-a-bandes",
+   "fix": "A (eb16621)",
+   "source": "synthetic",
+   "image": "images/s-a-bandes.jpg",
+   "rotation": 0,
+   "mechanism": "Numbers in two bands of two columns (1-3 | 4-6, then 7-9 | 10-12), lowercase.",
+   "level": "regression",
+   "state": "active",
+   "style": "minuscules",
+   "generation": {
+    "tool": "train/decision/regression/jumeaux.py",
+    "mechanism": "bandes",
+    "seed": 4467,
+    "index": 0
+   },
+   "expected": {
+    "words": [
+     "strong",
+     "under",
+     "license",
+     "time",
+     "dignity",
+     "gorilla",
+     "raven",
+     "tomorrow",
+     "average",
+     "merit",
+     "pole",
+     "raw"
+    ],
+    "never_false_sure": true
+   },
+   "before": "eb16621^",
+   "twin_of": "r-a-bandes"
+  },
+  {
+   "id": "s-a-bandes-capitales",
+   "fix": "A (eb16621)",
+   "source": "synthetic",
+   "image": "images/s-a-bandes-capitales.jpg",
+   "rotation": 0,
+   "mechanism": "Same in capitals.",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/decision/regression/jumeaux.py",
+    "mechanism": "bandes",
+    "seed": 4467,
+    "index": 4
+   },
+   "expected": {
+    "words": [
+     "vehicle",
+     "decrease",
+     "summer",
+     "city",
+     "hockey",
+     "flush",
+     "clip",
+     "sting",
+     "below",
+     "lake",
+     "element",
+     "degree"
+    ],
+    "never_false_sure": true
+   },
+   "before": "eb16621^",
+   "twin_of": "r-a-bandes"
+  },
+  {
+   "id": "s-b-rangees",
+   "fix": "rows (eb16621)",
+   "source": "synthetic",
+   "image": "images/s-b-rangees.jpg",
+   "rotation": 0,
+   "mechanism": "Words in rows of 5, 5 and 2, no numbers, no aligned columns.",
+   "level": "regression",
+   "state": "active",
+   "style": "minuscules",
+   "generation": {
+    "tool": "train/decision/regression/jumeaux.py",
+    "mechanism": "rangees",
+    "seed": 4467,
+    "index": 4
+   },
+   "expected": {
+    "words": [
+     "wagon",
+     "focus",
+     "you",
+     "tip",
+     "occur",
+     "day",
+     "will",
+     "hover",
+     "bamboo",
+     "curve",
+     "journey",
+     "phrase"
+    ],
+    "never_false_sure": true
+   },
+   "before": "eb16621^",
+   "twin_of": "r-b-rangees"
+  },
+  {
+   "id": "s-c-colonnes-serrees",
+   "fix": "box over the next column (eb16621)",
+   "source": "synthetic",
+   "image": "images/s-c-colonnes-serrees.jpg",
+   "rotation": 0,
+   "mechanism": "Two tight numbered columns, word 5 touching number 11.",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/decision/regression/jumeaux.py",
+    "mechanism": "serrees",
+    "seed": 4467,
+    "index": 9
+   },
+   "expected": {
+    "words": [
+     "luxury",
+     "wood",
+     "execute",
+     "race",
+     "success",
+     "rain",
+     "entry",
+     "marriage",
+     "bounce",
+     "before",
+     "useful",
+     "neck"
+    ],
+    "never_false_sure": true
+   },
+   "before": "eb16621^",
+   "twin_of": "r-c-colonnes-serrees"
+  },
+  {
+   "id": "s-f12-empreinte-en-bout",
+   "fix": "C8 (2c2a509)",
+   "source": "synthetic",
+   "image": "images/s-f12-empreinte-en-bout.jpg",
+   "rotation": 0,
+   "mechanism": "Fingerprint written right of word 12, on its row.",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/decision/regression/jumeaux.py",
+    "mechanism": "fp_bout",
+    "seed": 4467,
+    "index": 0
+   },
+   "expected": {
+    "words": [
+     "gas",
+     "illness",
+     "crime",
+     "dress",
+     "avocado",
+     "long",
+     "decline",
+     "wheat",
+     "ramp",
+     "industry",
+     "small",
+     "nose"
+    ],
+    "verified": true,
+    "fingerprint": "5e2effa4",
+    "never_false_sure": true
+   },
+   "before": "a7dfd23",
+   "twin_of": "r-f12-empreinte-en-bout"
+  },
+  {
+   "id": "s-f12-empreinte-en-bout-2",
+   "fix": "C8 (2c2a509)",
+   "source": "synthetic",
+   "image": "images/s-f12-empreinte-en-bout-2.jpg",
+   "rotation": 0,
+   "mechanism": "Same, other writing.",
+   "level": "regression",
+   "state": "active",
+   "style": "minuscules",
+   "generation": {
+    "tool": "train/decision/regression/jumeaux.py",
+    "mechanism": "fp_bout",
+    "seed": 4467,
+    "index": 5
+   },
+   "expected": {
+    "words": [
+     "begin",
+     "abuse",
+     "debris",
+     "camera",
+     "promote",
+     "merry",
+     "perfect",
+     "drum",
+     "make",
+     "empower",
+     "envelope",
+     "sock"
+    ],
+    "verified": true,
+    "fingerprint": "eeae5cb6",
+    "never_false_sure": true
+   },
+   "before": "a7dfd23",
+   "twin_of": "r-f12-empreinte-en-bout"
+  },
+  {
+   "id": "s-securite-voisine15",
+   "fix": "fingerprint safety",
+   "source": "synthetic",
+   "image": "images/s-securite-voisine15.jpg",
+   "rotation": 0,
+   "mechanism": "Valid 15-word seed under which the fingerprint of another valid seed, one or two words apart, is written: must never be verified.",
+   "level": "security",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/decision/regression/jumeaux.py",
+    "mechanism": "voisine15",
+    "seed": 4467,
+    "index": 0
+   },
+   "truth": [
+    "fiction",
+    "party",
+    "multiply",
+    "edge",
+    "thing",
+    "chapter",
+    "dog",
+    "insane",
+    "mobile",
+    "topic",
+    "keen",
+    "then",
+    "apart",
+    "twice",
+    "exercise"
+   ],
+   "expected": {
+    "verified": false,
+    "never_false_sure": true
+   }
+  },
+  {
+   "id": "s-securite-voisine15-2",
+   "fix": "fingerprint safety",
+   "source": "synthetic",
+   "image": "images/s-securite-voisine15-2.jpg",
+   "rotation": 0,
+   "mechanism": "Same.",
+   "level": "security",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/decision/regression/jumeaux.py",
+    "mechanism": "voisine15",
+    "seed": 4467,
+    "index": 3
+   },
+   "truth": [
+    "rapid",
+    "spread",
+    "jelly",
+    "fall",
+    "blood",
+    "inner",
+    "brisk",
+    "obscure",
+    "utility",
+    "danger",
+    "grass",
+    "host",
+    "own",
+    "brain",
+    "depart"
+   ],
+   "expected": {
+    "verified": false,
+    "never_false_sure": true
+   }
+  },
+  {
+   "id": "s-securite-demi-carte",
+   "fix": "safety: card cut by the frame",
+   "source": "synthetic",
+   "image": "images/s-securite-demi-carte.jpg",
+   "rotation": 0,
+   "mechanism": "SeedSigner 24-word card cut by the frame; the visible column alone is a valid 12-word seed (half seed): must never be given as sure.",
+   "level": "security",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/decision/regression/jumeaux.py",
+    "mechanism": "demi_carte",
+    "seed": 4467,
+    "index": 0
+   },
+   "truth": [
+    "crumble",
+    "power",
+    "length",
+    "airport",
+    "hurry",
+    "old",
+    "candy",
+    "dismiss",
+    "title",
+    "autumn",
+    "slot",
+    "system",
+    "shoulder",
+    "ribbon",
+    "program",
+    "pilot",
+    "mammal",
+    "purchase",
+    "category",
+    "demand",
+    "gather",
+    "wild",
+    "crouch",
+    "agree"
+   ],
+   "expected": {
+    "rejected": true
+   }
+  },
+  {
+   "id": "s-securite-demi-carte-2",
+   "fix": "safety: card cut by the frame",
+   "source": "synthetic",
+   "image": "images/s-securite-demi-carte-2.jpg",
+   "rotation": 0,
+   "mechanism": "Same.",
+   "level": "security",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/decision/regression/jumeaux.py",
+    "mechanism": "demi_carte",
+    "seed": 4467,
+    "index": 3
+   },
+   "truth": [
+    "awful",
+    "width",
+    "salad",
+    "two",
+    "drive",
+    "afford",
+    "ocean",
+    "source",
+    "prison",
+    "cart",
+    "curve",
+    "view",
+    "thing",
+    "penalty",
+    "salt",
+    "magnet",
+    "loyal",
+    "atom",
+    "upper",
+    "fiber",
+    "raccoon",
+    "fluid",
+    "offer",
+    "insect"
+   ],
+   "expected": {
+    "rejected": true
+   }
+  },
+  {
+   "id": "s-securite-bandes-colonnes",
+   "fix": "band order offered without numbers, low trust when the order stays ambiguous",
+   "source": "synthetic",
+   "image": "images/s-securite-bandes-colonnes.jpg",
+   "rotation": 0,
+   "mechanism": "Numbers in two bands (1-3 | 4-6, 7-9 | 10-12) glued to the words and not detected: reading column by column (1-3, 7-9, 4-6, 10-12) passes the checksum by chance; without the band order the reading came out valid, trust High, wrong seed. With it, two orders give a plausible seed: the order is ambiguous, never sure, trust Low.",
+   "level": "security",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/decision/regression/jumeaux.py",
+    "mechanism": "bandes",
+    "seed": 4467,
+    "index": 3
+   },
+   "truth": [
+    "viable",
+    "aim",
+    "fresh",
+    "phrase",
+    "glue",
+    "cart",
+    "attitude",
+    "travel",
+    "absent",
+    "armor",
+    "electric",
+    "almost"
+   ],
+   "expected": {
+    "never_false_sure": true,
+    "max_trust": 1
+   },
+   "before": "daf4e8f"
+  },
+  {
+   "id": "s-bandes-sans-numeros",
+   "fix": "band order offered without numbers",
+   "source": "synthetic",
+   "image": "images/s-bandes-sans-numeros.jpg",
+   "rotation": 0,
+   "mechanism": "12 words without numbers in two bands of two columns (1-3 | 4-6, then 7-9 | 10-12); neither the column by column nor the row by row reading passes the checksum, only the band order gives the seed.",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/decision/regression/jumeaux.py",
+    "mechanism": "bandes_nues",
+    "seed": 4492,
+    "index": 0
+   },
+   "expected": {
+    "words": [
+     "more",
+     "train",
+     "cloth",
+     "buddy",
+     "sight",
+     "before",
+     "side",
+     "music",
+     "melody",
+     "comic",
+     "divert",
+     "garment"
+    ],
+    "never_false_sure": true
+   },
+   "before": "daf4e8f"
+  },
+  {
+   "id": "s-bandes-sans-numeros-2",
+   "fix": "band order offered without numbers",
+   "source": "synthetic",
+   "image": "images/s-bandes-sans-numeros-2.jpg",
+   "rotation": 0,
+   "mechanism": "Same, other writing.",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/decision/regression/jumeaux.py",
+    "mechanism": "bandes_nues",
+    "seed": 4492,
+    "index": 5
+   },
+   "expected": {
+    "words": [
+     "credit",
+     "parade",
+     "kitchen",
+     "story",
+     "panic",
+     "sorry",
+     "wife",
+     "shuffle",
+     "later",
+     "wet",
+     "click",
+     "eyebrow"
+    ],
+    "never_false_sure": true
+   },
+   "before": "daf4e8f"
+  },
+  {
+   "id": "s-hypothese-empreinte-12",
+   "fix": "fingerprint hypothesis kept unverified (47c1db3, HYPOTHESIS_KEPT)",
+   "source": "synthetic",
+   "image": "images/s-hypothese-empreinte-12.jpg",
+   "rotation": 0,
+   "mechanism": "List of 12 lowercase words with a fingerprint line under it read only as a hypothesis, matching no seed read: the list was not found (13 lines); it is now read, unverified, trust Low.",
+   "level": "regression",
+   "state": "active",
+   "style": "minuscules",
+   "generation": {
+    "tool": "train/redteam/gen_rt.py simple --empreinte 1",
+    "seed": 45109,
+    "index": 44
+   },
+   "expected": {
+    "words": [
+     "energy",
+     "mix",
+     "pave",
+     "inspire",
+     "fire",
+     "stand",
+     "wood",
+     "hundred",
+     "coach",
+     "rude",
+     "toddler",
+     "afford"
+    ],
+    "never_false_sure": true,
+    "verified": false,
+    "max_trust": 1
+   },
+   "before": "f7c2cfd",
+   "twin_of": "r-hypothese-empreinte"
+  },
+  {
+   "id": "s-hypothese-empreinte-24",
+   "fix": "fingerprint hypothesis kept unverified (47c1db3, HYPOTHESIS_KEPT)",
+   "source": "synthetic",
+   "image": "images/s-hypothese-empreinte-24.jpg",
+   "rotation": 0,
+   "mechanism": "Same with 24 lowercase words, the fingerprint above the list (25 lines).",
+   "level": "regression",
+   "state": "active",
+   "style": "minuscules",
+   "generation": {
+    "tool": "train/redteam/gen_rt.py simple --empreinte 1 --numeros 1 --position haut",
+    "seed": 45112,
+    "index": 102
+   },
+   "expected": {
+    "words": [
+     "raw",
+     "job",
+     "board",
+     "attack",
+     "capable",
+     "satisfy",
+     "alter",
+     "again",
+     "luggage",
+     "turtle",
+     "rely",
+     "fortune",
+     "together",
+     "grief",
+     "solid",
+     "secret",
+     "law",
+     "lazy",
+     "inquiry",
+     "blood",
+     "jungle",
+     "clerk",
+     "ocean",
+     "stuff"
+    ],
+    "never_false_sure": true,
+    "verified": false,
+    "max_trust": 1
+   },
+   "before": "f7c2cfd",
+   "twin_of": "r-hypothese-empreinte"
+  },
+  {
+   "id": "s-abreges-carte12",
+   "fix": "4-letter abbreviated words (8616089)",
+   "source": "synthetic",
+   "image": "images/s-abreges-carte12.jpg",
+   "rotation": 0,
+   "mechanism": "SeedSigner card, 12 words in capitals, every word longer than 4 letters written as its first 4 letters.",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/abreges/gen_univ_abreges.py --test (ABR bench configuration)",
+    "seed": 44931,
+    "index": 8
+   },
+   "expected": {
+    "words": [
+     "lens",
+     "power",
+     "price",
+     "neglect",
+     "employ",
+     "monitor",
+     "garment",
+     "reduce",
+     "family",
+     "daughter",
+     "sight",
+     "nation"
+    ],
+    "never_false_sure": true
+   },
+   "before": "2c2a509"
+  },
+  {
+   "id": "s-abreges-carte24",
+   "fix": "4-letter abbreviated words (8616089)",
+   "source": "synthetic",
+   "image": "images/s-abreges-carte24.jpg",
+   "rotation": 0,
+   "mechanism": "SeedSigner card, 24 words in capitals, every word longer than 4 letters written as its first 4 letters.",
+   "level": "regression",
+   "state": "active",
+   "style": "capitales",
+   "generation": {
+    "tool": "train/abreges/gen_univ_abreges.py --test (ABR bench configuration)",
+    "seed": 44931,
+    "index": 11
+   },
+   "expected": {
+    "words": [
+     "addict",
+     "brave",
+     "clinic",
+     "cake",
+     "either",
+     "replace",
+     "midnight",
+     "person",
+     "verify",
+     "swap",
+     "share",
+     "parrot",
+     "undo",
+     "net",
+     "thought",
+     "eye",
+     "urge",
+     "day",
+     "unusual",
+     "capital",
+     "device",
+     "cool",
+     "february",
+     "token"
+    ],
+    "never_false_sure": true
+   },
+   "before": "2c2a509"
+  }
+ ]
+}

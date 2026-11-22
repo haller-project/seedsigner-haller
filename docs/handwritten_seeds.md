@@ -693,15 +693,16 @@ Haller repository.
 
 ### Regression cases
 
-The regression set holds one synthetic page per fix of the harness and per
-safety trap, with the reading expected: every page fails with the engine
-before its fix and passes with the fix; a case still waiting for its fix is
-an expected failure. It is to be published in `tests/handwriting_regression/`
-with its test: some of its pages were taken from the test benches, and they
-are being replaced by pages drawn for the regression set alone, so that no
-page or seed of a test bench is published. Safety cases check
-that a reading is never verified, nor valid, when it is wrong, and that at
-most 3 seeds are compared with a fingerprint line per photo. Every new fix
+`tests/handwriting_regression/` holds one synthetic page per fix of the
+harness and per safety trap, with the reading expected (`cases.json`, see its
+`README.md`): every page fails with the engine before its fix and passes with
+the fix. The pages are drawn for this set alone, by the generators of the
+benches with other seeds: none is a page or a seed of a test or tuning bench.
+`tests/test_handwriting_regression.py` reads them all (about 30 s); a case
+still waiting for its fix is an expected failure. Safety cases check
+that a reading is never verified, nor valid, when it is wrong; the bound of
+3 seeds compared with a fingerprint line per photo is checked by
+`tests/test_handwriting_fingerprint.py`. Every new fix
 adds its case in the same change.
 
 ### Tests in the CI (proposal)

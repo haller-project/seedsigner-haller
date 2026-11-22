@@ -22,8 +22,8 @@ CASES = json.load(open(os.path.join(HERE, "cases.json")))["cases"]
 
 
 def read(path, rotation=0, compared=None):
-    """ (status, words, verified) of the page; status "not_found" when no list or card is found. `compared`, a
-    list, receives one item per seed compared with a fingerprint line during the reading. """
+    """ (status, words, verified, trust level) of the page; status "not_found" when no list or card is found.
+    `compared`, a list, receives one item per seed compared with a fingerprint line during the reading. """
     import seedsigner.helpers.handwriting as hw
     from seedsigner.helpers.handwriting import fingerprint
     from seedsigner.helpers.handwriting.page import WordsNotFound
@@ -36,14 +36,14 @@ def read(path, rotation=0, compared=None):
     try:
         reading = hw.read_seed(photo)
     except WordsNotFound:
-        return "not_found", [], False
+        return "not_found", [], False, None
     finally:
         fingerprint.seed_fingerprint = seed_fingerprint
     analysis = reading.analyze()
-    return analysis.status, list(analysis.mnemonic), bool(getattr(reading, "verified", False))
+    return analysis.status, list(analysis.mnemonic), bool(getattr(reading, "verified", False)), reading.trust().level
 
 
-def failures(case, status, words, verified, compared=0):
+def failures(case, status, words, verified, compared=0, trust=None):
     """ Reasons why the reading does not meet what the case expects (empty: it does). """
     expected = case["expected"]
     truth = expected.get("words") or case.get("truth")
@@ -66,6 +66,8 @@ def failures(case, status, words, verified, compared=0):
         out.append(f"{len(words)} words read instead of {expected['word_count']}")
     if "max_seeds_compared" in expected and compared > expected["max_seeds_compared"]:
         out.append(f"SAFETY: {compared} seeds compared with the fingerprint, at most {expected['max_seeds_compared']}")
+    if "max_trust" in expected and not verified and trust is not None and trust > expected["max_trust"]:
+        out.append(f"SAFETY: trust level {trust}, at most {expected['max_trust']}")
     if "min_words_right" in expected:
         right = sum(a == b for a, b in zip(words, truth)) if len(words) == len(truth) else 0
         if right < expected["min_words_right"]:
@@ -92,5 +94,5 @@ def test_cases_are_well_formed():
     for c in CASES])
 def test_regression_case(case):
     compared = []
-    status, words, verified = read(os.path.join(HERE, case["image"]), case.get("rotation", 0), compared)
-    assert not failures(case, status, words, verified, len(compared))
+    status, words, verified, trust = read(os.path.join(HERE, case["image"]), case.get("rotation", 0), compared)
+    assert not failures(case, status, words, verified, len(compared), trust)

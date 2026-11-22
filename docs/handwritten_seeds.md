@@ -162,12 +162,15 @@ So it is when text is left out of the crops of a list (a missed line, two
 columns read as one): the number of words is then uncertain.
 
 A list in two columns of equal length is read column by column, or row by
-row when only that order gives a valid seed. A permutation of a seed passes
-the checksum once in 16 for 12 words (once in 256 for 24), with every word
-read with high probability: when both orders give a plausible seed (valid,
-probability at least 0.1), the order written is unknown. Every word is then
-marked uncertain, and the status notice asks to check the order of every word
-against the paper.
+row when only that order gives a valid seed; when the columns are split by a
+wide gap into two bands (1-3 beside 4-6, then 7-9 beside 10-12), band by band
+is a third order, offered whether line numbers are read or not. A permutation
+of a seed passes the checksum once in 16 for 12 words (once in 256 for 24),
+with every word read with high probability: when two orders give a plausible
+seed (valid, probability at least 0.1), the order written is unknown. Every
+word is then marked uncertain, the trust gauge shows Low (the probability of
+the seed measures its words, not its order), and the status notice asks to
+check the order of every word against the paper.
 
 Line numbers, when they are written, tell the order. They are read only when
 the order matters (more than one order passes the checksum), by the first
@@ -216,8 +219,8 @@ puts no box on printed text. Then `detector.find_words`:
    a page upside down or turned a quarter turn is not read (no wrong reading:
    « not found »);
 5. takes the order of the words from the numbers read when they tell it,
-   otherwise from the columns and rows; when both orders of two columns pass
-   the checksum, no word is certain;
+   otherwise from the columns, rows and bands; when two orders pass the
+   checksum, no word is certain and the gauge is Low;
 6. tells a card cut by the frame of the photo: its area reaches a real edge of
    the photo beyond its text, and a word or number of the card is seen beyond
    the text on that side; otherwise the card is whole when the number of its
@@ -516,7 +519,7 @@ a wrong seed (a truncated word read as another BIP39 word, for instance).
 | 4, verified | the fingerprint matches (`reading.verified`); a word confirmed by the user that differs from the verified seed takes it away | all |
 | 3, high | no fingerprint read, and the checksum analysis leaves no word uncertain | at least 90 % |
 | 2, medium | no fingerprint read, the seed is valid with words to check, and its probability is at least 0.5 (`MIN_MEDIUM_SEED_PROBABILITY`) | at least 40 % |
-| 1, low | anything else: improbable or invalid seed, or a fingerprint read that matches none of the seeds read (evidence against them: 10 to 25 % of such seeds are right on the tuning pages) | none |
+| 1, low | anything else: improbable or invalid seed, a fingerprint read that matches none of the seeds read (evidence against them: 10 to 25 % of such seeds are right on the tuning pages), or an order left ambiguous by the layout (two orders give a plausible seed, neither the numbers nor the fingerprint chose one: 26 of 94 such seeds right on the simulated benches) | none |
 
 The announced shares (`TRUST_RATES`) were chosen on simulated tuning pages
 only (DEV2, SERRE_DEV and lists with a fingerprint, 2 757 pages). With the

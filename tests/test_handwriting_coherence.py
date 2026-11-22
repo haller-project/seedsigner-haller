@@ -91,6 +91,9 @@ def test_a_crop_read_again_reuses_the_networks(monkeypatch):
         def scores(self, log_probs):
             return np.arange(4, dtype=float)
 
+        def raw(self, log_probs):
+            return self.scores(log_probs), np.full(4, -np.inf)
+
     monkeypatch.setattr(hw, "load_engine", lambda: (Net(), Dec(), Net()))
     monkeypatch.setattr(hw, "normalize_word", lambda crop: np.asarray(crop, np.float32))
 

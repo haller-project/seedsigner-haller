@@ -83,6 +83,19 @@ FIRST, LOWERCASE, BLEND = (1.0, 0.0), (0.0, 1.0), (BLEND_WEIGHT, 1 - BLEND_WEIGH
 # 1.7 cards and cursive).
 TEMPERATURES = {FIRST: 2.2, LOWERCASE: 2.2, BLEND: 2.2}
 
+# Words abbreviated to their first 4 letters (decoder.ABBREVIATION_LETTERS). Every word may be read abbreviated,
+# with the a priori penalty decoder.ABBREVIATION_PENALTY, high so that words written in full read as before. A
+# layout on which at least ABBREVIATED_MIN_WORDS words, and ABBREVIATED_SHARE of its words, read better as some
+# abbreviation than as any word written in full by ABBREVIATION_EVIDENCE (decoder.abbreviation_evidence, first
+# crops, networks of the reading) is an abbreviated list: its words are read again with ABBREVIATED_PAGE_PENALTY (the
+# outputs of the networks and of the decoder are reused). Lists may mix both forms (words of 3 or 4 letters are always
+# written in full). Chosen on the tuning pages only (real photos DEV and site, DEVR, FPDEV, ETIQDEV, 200 simulated
+# abbreviated pages; 22/11/2026, docs/mots-abreges.md): an evidence of 0 lost 4 exact seeds of DEVR, 3 none.
+ABBREVIATED_PAGE_PENALTY = 0.0
+ABBREVIATION_EVIDENCE = 3.0
+ABBREVIATED_MIN_WORDS = 3
+ABBREVIATED_SHARE = 0.25
+
 # Line numbers written before the words of a list in two columns fix the
 # reading order: a number read with a probability of at least
 # NUMBER_PROBABILITY is a vote for the orders in which its word has that
@@ -232,10 +245,22 @@ class WordReading:
     """
         image: grayscale crop of the handwritten word
         candidates: (word, log-likelihood) pairs, most likely first
+        abbreviated: candidates read in their abbreviated form (see
+            decoder.ABBREVIATION_LETTERS)
     """
-    def __init__(self, image: Image.Image, candidates: list[tuple[str, float]]):
+    def __init__(self, image: Image.Image, candidates: list[tuple[str, float]], abbreviated: frozenset = frozenset()):
         self.image = image
         self.candidates = candidates
+        self.abbreviated = abbreviated
+
+
+    def letters(self, word: str) -> int:
+        """
+            Number of letters of `word` as written: ABBREVIATION_LETTERS if it
+            was read abbreviated.
+        """
+        from .decoder import ABBREVIATION_LETTERS
+        return ABBREVIATION_LETTERS if word in self.abbreviated else len(word)
 
 
 
@@ -418,7 +443,7 @@ def log_softmax(scores: np.ndarray) -> np.ndarray:
 # the crop alone. Emptied at the start and the end of read_seed.
 WORD_CACHE = True
 _crop_cache = {}   # key of a crop: ink map or None
-_score_cache = {}  # (key, model): (outputs of the network, word scores)
+_score_cache = {}  # (key, model): (outputs of the network, of the decoder (decoder.Decoder.raw), combined scores)
 _fingerprint_cache = {}  # key of a crop: outputs of the fingerprint network
 
 
@@ -449,6 +474,11 @@ class LayoutReader:
         self.layout = layout
         self.inks = {}     # (k, variant): (crop, ink map or None)
         self.scores = {}   # (k, variant, model): word scores
+        self.leads = {}    # (k, variant, model): lead of the abbreviated forms (decoder.Decoder.forms)
+        self.raw = {}      # (k, variant, model): outputs of the decoder (decoder.Decoder.raw)
+        self.combined = {}  # (k, variant, model): {penalty: (scores, leads)}, shared through _score_cache
+        self.penalty = None  # penalty of the abbreviated forms: decoder.ABBREVIATION_PENALTY, or that of a list
+        #                      read as abbreviated (ABBREVIATED_PAGE_PENALTY, see abbreviated_list)
         self.log_probs = {}  # (k, variant, model): outputs of the network
         self.numbers = {}  # k: (number, probability) or None
         self.keys = {}     # (k, variant): key of the crop (WORD_CACHE)
@@ -477,17 +507,51 @@ class LayoutReader:
         if ink is None:
             return None
         if (k, variant, model) not in self.scores:
+            from .decoder import combine_forms
             cached = (self.keys[(k, variant)], model) if WORD_CACHE and (k, variant) in self.keys else None
-            if cached is not None and cached in _score_cache:
-                self.log_probs[(k, variant, model)], self.scores[(k, variant, model)] = _score_cache[cached]
+            key = (k, variant, model)
+            if key in self.raw:
+                pass
+            elif cached is not None and cached in _score_cache:
+                self.log_probs[key], self.raw[key], self.combined[key] = _score_cache[cached]
             else:
                 first, decoder, lowercase = load_engine()
                 network = lowercase if model else first
-                self.log_probs[(k, variant, model)] = network.log_probs(ink)
-                self.scores[(k, variant, model)] = decoder.scores(self.log_probs[(k, variant, model)])
+                self.log_probs[key] = network.log_probs(ink)
+                self.raw[key] = decoder.raw(self.log_probs[key])
+                self.combined[key] = {}
                 if cached is not None:
-                    _score_cache[cached] = self.log_probs[(k, variant, model)], self.scores[(k, variant, model)]
+                    _score_cache[cached] = self.log_probs[key], self.raw[key], self.combined[key]
+            if self.penalty not in self.combined[key]:
+                self.combined[key][self.penalty] = combine_forms(*self.raw[key], self.penalty)
+            self.scores[key], self.leads[key] = self.combined[key][self.penalty]
         return self.scores[(k, variant, model)]
+
+
+    def abbreviated_list(self, weights: tuple[float, float]) -> bool:
+        """
+            True if the words of the layout, first crops, read with `weights`,
+            make an abbreviated list (see ABBREVIATED_PAGE_PENALTY): the penalty
+            of the abbreviated forms is then lowered for every later reading
+            (the scores computed are dropped). Decided once per layout.
+        """
+        from .decoder import ABBREVIATIONS, abbreviation_evidence
+        if self.penalty is not None or not ABBREVIATIONS:
+            return False
+        models = [m for m in (0, 1) if weights[m]]
+        found = 0
+        for k in range(self.layout.count):
+            if self.model_scores(k, 0, models[0]) is None:
+                continue
+            evidence = np.mean([abbreviation_evidence(*self.raw[(k, 0, m)]) for m in models
+                                if self.model_scores(k, 0, m) is not None])
+            found += evidence >= ABBREVIATION_EVIDENCE
+        if found < max(ABBREVIATED_MIN_WORDS, ABBREVIATED_SHARE * self.layout.count):
+            return False
+        self.penalty = ABBREVIATED_PAGE_PENALTY
+        self.scores.clear()
+        self.leads.clear()
+        return True
 
 
     def read(self, k: int, variant: int, weights: tuple[float, float]) -> WordReading | None:
@@ -513,14 +577,18 @@ class LayoutReader:
             return WordReading(crop, [(w, 0.0) for w in words[:CANDIDATES]])
         if weights[1] == 0:
             scores = self.model_scores(k, variant, 0)
+            lead = self.leads[(k, variant, 0)]
         elif weights[0] == 0:
             scores = self.model_scores(k, variant, 1)
+            lead = self.leads[(k, variant, 1)]
         else:
             scores = weights[0] * log_softmax(self.model_scores(k, variant, 0)) \
                 + weights[1] * log_softmax(self.model_scores(k, variant, 1))
+            lead = weights[0] * self.leads[(k, variant, 0)] + weights[1] * self.leads[(k, variant, 1)]
         scores = scores / TEMPERATURES[weights]
         best = np.argsort(-scores, kind="stable")[:CANDIDATES]
-        return WordReading(crop, [(words[i], float(scores[i])) for i in best])
+        return WordReading(crop, [(words[i], float(scores[i])) for i in best],
+                           frozenset(words[i] for i in best if lead[i] > 0))
 
 
 
@@ -607,6 +675,11 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
         progress.step(WORD_COST if weights == FIRST else OTHER_WORD_COST)
         if on_word:
             on_word(layout, k, words[-1])
+    if getattr(reader, "abbreviated_list", None) and reader.abbreviated_list(weights):   # (readers of the tests)
+        for k in range(layout.count):
+            words[k] = reader.read(k, 0, weights)
+            if on_word:
+                on_word(layout, k, words[k])
     reading = seed_reading(layout.orders[0])
 
     # Re-reads of the least probable words, on their other crops
@@ -618,8 +691,9 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
             others = [r for r in (reader.read(k, v, weights) for v in range(1, layout.variants)) if r is not None]
             progress.step(REREAD_COST)
             if others:
-                best = max((r.candidates for r in others), key=top_probability)
-                words[k] = WordReading(words[k].image, combine(words[k].candidates, best))
+                best = max(others, key=lambda r: top_probability(r.candidates))
+                words[k] = WordReading(words[k].image, combine(words[k].candidates, best.candidates),
+                                       words[k].abbreviated | (best.abbreviated - {w for w, _ in words[k].candidates}))
                 reading = seed_reading(layout.orders[0])
 
     # Two columns of equal length: column by column, or row by row if only
@@ -833,7 +907,7 @@ def stretched_words(reading: SeedReading) -> set[int]:
     lengths = getattr(reading.layout, "lengths", None)
     if lengths is None:
         return set()
-    per_letter = [lengths[k] / len(w.candidates[0][0]) for k, w in zip(reading.order, reading.words)]
+    per_letter = [lengths[k] / w.letters(w.candidates[0][0]) for k, w in zip(reading.order, reading.words)]
     median = float(np.median(per_letter))
     return {i for i, x in enumerate(per_letter) if x >= STRETCH * median}
 
@@ -1056,7 +1130,8 @@ def check_fingerprint(reading: SeedReading, pool: list, progress: Progress, trim
         return reading
     seed, words = matched
     check.status = "verified"
-    verified = SeedReading(reading.kind, [WordReading(w.image, [(word, 0.0)]) for word, w in zip(seed, words)],
+    verified = SeedReading(reading.kind, [WordReading(w.image, [(word, 0.0)], w.abbreviated & {word})
+                                             for word, w in zip(seed, words)],
                            reading.min_seed_probability)
     verified.fingerprint_crop = reading.fingerprint_crop
     verified.fingerprint_others = list(getattr(reading, "fingerprint_others", []))

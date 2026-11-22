@@ -81,9 +81,11 @@ BEYOND_TEXT = 0.3             # writing of a card farther than this many word he
 ZOOM_SHARE = 0.5              # documents covering less of the photo are detected again on their region (0.4 before
                               # the detector of 21/11/2026)
 ZOOM_MARGIN = 0.15            # margin of that region, share of its size on each side
-ZOOM_STRAY_CARDS = False      # a card kernel without the shape of a card (card_shaped) holding fewer than
-                              # MIN_GROUP_WORDS words widens the region of the document (before task-4497: True); such a
-                              # kernel is a part of the sheet, whose words find_words frees anyway
+ZOOM_STRAY_CARDS = True       # (variant, off when False) a card kernel without the shape of a card (card_shaped) holding
+                              # fewer than MIN_GROUP_WORDS words widens the region of the document. False (task-4497):
+                              # such kernels left out, so that a small list on a landscape photo is detected again
+                              # closer; on the frozen benches 21 exact seeds gained and 23 lost, 13 verified lost: kept
+                              # as it was
 
 # Lines and columns, in word box heights
 SAME_LINE = 0.55              # two boxes closer than this across the text direction are on the same line
@@ -515,8 +517,8 @@ def on_card(det: Detection, point: tuple[float, float], card: int) -> bool:
 def document_region(det: Detection, size: tuple[int, int]) -> tuple[int, int, int, int] | None:
     """
         Region of the photo (photo pixels, `size`) holding the words and cards
-        found (a card kernel too small or loose for a card holding fewer than
-        MIN_GROUP_WORDS words left out, see ZOOM_STRAY_CARDS), widened by ZOOM_MARGIN of its size on each side, if it covers less
+        found (with ZOOM_STRAY_CARDS False, a card kernel too small or loose for
+        a card holding fewer than MIN_GROUP_WORDS words left out), widened by ZOOM_MARGIN of its size on each side, if it covers less
         than ZOOM_SHARE of the area seen by the network: the words are then
         found again on it, at a higher resolution. None otherwise.
     """

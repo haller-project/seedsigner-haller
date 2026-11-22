@@ -397,6 +397,24 @@ class SeedReading:
 
 
 
+# Stages reported to Progress.on_stage while reading, for display only:
+# "load" (word models), "find" (detection on the whole photo), "closer" (detection
+# on the region of the document), "lines" (lines and columns), "numbers" (line
+# numbers read, done/total), "order" (order
+# told by the line numbers), "guard" (guards of a valid seed),
+# "spare" (lines outside the words tried as a fingerprint, done), "rows" (rows at
+# the start or end of a list tried as a label or a fingerprint, done), "words",
+# "words2", "words3" (words read by the first network, the second, their blend:
+# done/total, layout, k), "reread" (re-reading of the least probable words:
+# done/total, layout, k), "fp_read" (fingerprint line read, done/total), "fp_check"
+# (fingerprints of the candidate seeds computed, done/total). The start of an
+# attempt is reported as "attempt:" + one of ATTEMPTS: "first" (first search),
+# "list" (a card read as a list), "extra" (a list read without rows at its start
+# or end), "crossed" (search without the words scribbled over).
+ATTEMPTS = ("first", "list", "extra", "crossed")
+
+
+
 class Progress:
     """
         Progress of a reading, reported as a fraction to `report(fraction)`.
@@ -404,11 +422,39 @@ class Progress:
         a Pi Zero) expected to remain: the progress is steady when the expected
         costs are right, and never goes back nor stops long when they are not.
     """
-    def __init__(self, report, remaining: float):
+    def __init__(self, report, remaining: float, on_stage=None):
         self.report = report
         self.remaining = remaining
         self.fraction = 0.0
+        self.on_stage = on_stage
+        self.attempt = None
         report(0.0)
+
+
+    def __call__(self, cost: float):
+        """
+            Same as step: a Progress is the `step` given to detector.find_words.
+        """
+        self.step(cost)
+
+
+    def stage(self, name: str, done: int = None, total: int = None, layout=None, k: int = None):
+        """
+            What the reading does now, reported to `on_stage(name, done, total,
+            layout, k)` (see STAGES) for display only: `done` of `total` (either
+            may be None), `layout` and `k` the word concerned. Nothing of the
+            reading depends on it.
+        """
+        if self.on_stage:
+            self.on_stage(name, done, total, layout, k)
+
+
+    def start_attempt(self, name: str):
+        """
+            A new hypothesis on the page is tried (see ATTEMPTS).
+        """
+        self.attempt = name
+        self.stage("attempt:" + name)
 
 
     def step(self, cost: float):
@@ -679,7 +725,9 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
         reading.layout, reading.order = layout, list(order)
         return reading
 
+    words_stage = "words" if weights == FIRST else "words2" if weights == LOWERCASE else "words3"
     for k in range(layout.count):
+        progress.stage(words_stage, k + 1, layout.count, layout, k)
         words.append(reader.read(k, 0, weights))
         progress.step(WORD_COST if weights == FIRST else OTHER_WORD_COST)
         if on_word:
@@ -694,9 +742,11 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
     # Re-reads of the least probable words, on their other crops
     if layout.variants > 1:
         least_probable = sorted(range(layout.count), key=lambda k: top_probability(words[k].candidates))
-        for k in least_probable[:MAX_REREADS]:
+        rereads = least_probable[:MAX_REREADS]
+        for i, k in enumerate(rereads):
             if reading.analyze().status == "valid":
                 break
+            progress.stage("reread", i + 1, len(rereads), layout, k)
             others = [r for r in (reader.read(k, v, weights) for v in range(1, layout.variants)) if r is not None]
             progress.step(REREAD_COST)
             if others:
@@ -717,6 +767,7 @@ def read_layout(reader: LayoutReader, progress: Progress, weights: tuple[float, 
                                                      analysis.valid_seed_log_probabilities(FINGERPRINT_CANDIDATES))):
                 pool.append((rank, seed, r.words, log_p))
     if any(r.analyze().status != "invalid" for r in readings[1:]):
+        progress.stage("order")
         order = reader.numbered_order()
         if order is not None:
             reading = readings[order]
@@ -745,7 +796,10 @@ def read_page(reader: LayoutReader, progress: Progress, weights: tuple[float, fl
     """
     reading = read_layout(reader, progress, weights, min_seed_probability, on_word, plausible, pool)
     if reading.analyze().status != "valid" and reader.alternative():
+        previous = progress.attempt
+        progress.start_attempt("list")
         other = read_layout(reader.alternative(), progress, weights, min_seed_probability, on_word, plausible, pool)
+        progress.start_attempt(previous)
         if STATUS_RANK[other.analyze().status] > STATUS_RANK[reading.analyze().status]:
             reading = other
     return reading
@@ -784,10 +838,11 @@ def read_words(layout, progress: Progress, on_word=None, plausible: list = None,
 
 
 
-def fingerprint_margins(crop: Image.Image) -> list[tuple[float, float]] | None:
+def fingerprint_margins(crop: Image.Image, on_network=None) -> list[tuple[float, float]] | None:
     """
         fingerprint.margins of the line on `crop` for the first and the
-        second network, or None if no ink is found.
+        second network, or None if no ink is found. `on_network()` is called
+        before each network (display only).
     """
     ink = normalize_word(crop)
     if ink is None:
@@ -795,59 +850,68 @@ def fingerprint_margins(crop: Image.Image) -> list[tuple[float, float]] | None:
     first, decoder, lowercase = load_engine()
     found = []
     for network in (first, lowercase):
+        if on_network is not None:
+            on_network()
         log_probs = network.log_probs(ink)
         found.append(fingerprint.margins(log_probs, decoder.scores(log_probs)))
     return found
 
 
 
-def is_fingerprint(crop: Image.Image) -> bool:
+def is_fingerprint(crop: Image.Image, on_network=None) -> bool:
     """
         True if the line on `crop` reads as a fingerprint rather than a word
-        (see FINGERPRINT_MARGIN).
+        (see FINGERPRINT_MARGIN). `on_network()` is called before each network
+        (display only).
     """
-    found = fingerprint_margins(crop)
+    found = fingerprint_margins(crop, on_network)
     if fingerprint_accepted(found):
         return True
     if found is None or sum(m for m, _ in found) / len(found) < FINGERPRINT_RESCUE_MARGIN:
         return False
     # near the threshold: the fingerprint network has the last word, with the same thresholds
+    if on_network is not None:
+        on_network()
     _, decoder, _ = load_engine()
     log_probs = fingerprint_network().log_probs(normalize_word(crop))
     return fingerprint_accepted([fingerprint.margins(log_probs, decoder.scores(log_probs))])
 
 
 
-def fingerprint_hypothesis_margin(crop: Image.Image) -> float | None:
+def fingerprint_hypothesis_margin(crop: Image.Image, on_network=None) -> float | None:
     """
         Margin of the line on `crop` read as a fingerprint by the fingerprint
         network (fingerprint.margins), if it is at least
         LOOSE_FINGERPRINT_MARGIN with a fit of at least FINGERPRINT_FIT, else
         None. Used only when no line of a list with one line too many passes
         is_fingerprint: the line is then left out as a hypothesis, kept only
-        if its fingerprint matches a seed read.
+        if its fingerprint matches a seed read. `on_network()` is called before
+        the network (display only).
     """
     ink = normalize_word(crop)
     if ink is None:
         return None
     _, decoder, _ = load_engine()
+    if on_network is not None:
+        on_network()
     log_probs = fingerprint_log_probs(crop, ink)
     margin, fit = fingerprint.margins(log_probs, decoder.scores(log_probs))
     return margin if margin >= LOOSE_FINGERPRINT_MARGIN and fit >= FINGERPRINT_FIT else None
 
 
 
-def line_role(crops: list[Image.Image]) -> tuple[str | None, Image.Image | None]:
+def line_role(crops: list[Image.Image], on_network=None) -> tuple[str | None, Image.Image | None]:
     """
         What a row of a list left out of the words reads as, on its crops
         (widest first): ("fingerprint", crop) if a crop passes is_fingerprint,
         ("label", None) if one of the first two reads as a label (see
         LABEL_MARGIN), ("loose", crop) if a crop passes
         fingerprint_hypothesis_margin, ("other", None) if the first reads as
-        no BIP39 word (NO_WORD_FIT), else (None, None).
+        no BIP39 word (NO_WORD_FIT), else (None, None). `on_network()` is
+        called before each network (display only).
     """
     for crop in crops:
-        if is_fingerprint(crop):
+        if is_fingerprint(crop, on_network):
             return "fingerprint", crop
     first, decoder, lowercase = load_engine()
     other = False
@@ -857,6 +921,8 @@ def line_role(crops: list[Image.Image]) -> tuple[str | None, Image.Image | None]
             continue
         found = []
         for network in (first, lowercase):
+            if on_network is not None:
+                on_network()
             log_probs = network.log_probs(ink)
             found.append(fingerprint.label_margins(log_probs, decoder.scores(log_probs)))
         margin, fit, word_fit = (sum(f[j] for f in found) / len(found) for j in range(3))
@@ -864,7 +930,7 @@ def line_role(crops: list[Image.Image]) -> tuple[str | None, Image.Image | None]
             return "label", None
         other = other or (i == 0 and word_fit <= NO_WORD_FIT)
     for crop in crops:
-        if fingerprint_hypothesis_margin(crop) is not None:
+        if fingerprint_hypothesis_margin(crop, on_network) is not None:
             return "loose", crop
     return ("other", None) if other else (None, None)
 
@@ -893,7 +959,7 @@ def search(find, gray: Image.Image, progress: Progress, on_word, pool: list, fin
     """
     plausible = []
     try:
-        layout = find(gray, progress.step, fingerprint=fingerprint)
+        layout = find(gray, progress, fingerprint=fingerprint)
     except WordsNotFound as e:
         return None, plausible, e
     progress.expect(progress.remaining + reading_cost(layout))
@@ -944,13 +1010,14 @@ def guard(reading: SeedReading):
 
 
 
-def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
+def read_seed(image: Image.Image, progress=None, on_word=None, on_stage=None) -> SeedReading:
     """
         Reads the seed written on `image` (upright photo, full resolution).
         `progress(fraction)` is called as the reading goes, at least every
         second or so on a Pi Zero; `on_word(layout, k, word_reading)` after the
-        first reading of each word. Raises WordsNotFound if no document with a
-        valid number of words is found.
+        first reading of each word; `on_stage` receives what the reading does
+        (see Progress.stage and STAGES), for display only. Raises WordsNotFound
+        if no document with a valid number of words is found.
 
         The words are found by the detector (detector.find_words) and read;
         a valid seed then goes through the guards (see guard), and a
@@ -960,8 +1027,10 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
         detector.CROSSED_OUT); the second one is kept if it is verified, or
         else has a better status, or else a more probable seed.
     """
-    progress = Progress(progress or (lambda fraction: None), detector.DETECTOR_COST + 12 * (WORD_COST + OTHER_WORD_COST))
+    progress = Progress(progress or (lambda fraction: None), detector.DETECTOR_COST + 12 * (WORD_COST + OTHER_WORD_COST),
+                        on_stage)
     if not _engine:
+        progress.stage("load")
         progress.expect(progress.remaining + LOAD_COST)
         load_engine()
         progress.step(LOAD_COST)
@@ -971,19 +1040,34 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
     _score_cache.clear()
     _fingerprint_cache.clear()
 
+    tried = [0, 0]  # readings of lines tried as a fingerprint, rows tried as a label or a fingerprint (shown only)
+
+    def network_read():
+        # each network reading a line tried as a fingerprint moves the counter (2-4s per line on a Pi Zero)
+        tried[0] += 1
+        progress.stage("spare", tried[0])
+
     def spare_line(crop):
         progress.step(WORD_COST + OTHER_WORD_COST)
-        return is_fingerprint(crop)
+        return is_fingerprint(crop, network_read)
 
     def hypothesis_margin(crop):
         progress.step(WORD_COST)
+        tried[0] += 1
+        progress.stage("spare", tried[0])
         return fingerprint_hypothesis_margin(crop)
 
     spare_line.margin = hypothesis_margin
 
+    def row_read():
+        # each network reading a row tried as a label or a fingerprint moves the counter
+        tried[1] += 1
+        progress.stage("rows", tried[1])
+
     def role(crops):
         progress.step(2 * WORD_COST)
-        return line_role(crops)
+        progress.stage("rows", tried[1] or None)
+        return line_role(crops, row_read)
 
     spare_line.role = role
 
@@ -995,6 +1079,7 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
 
     def attempt(crossed: bool):
         pool = []
+        progress.start_attempt("crossed" if crossed else "first")
 
         def find(image, step, fingerprint):
             return detector.find_words(image, step, fingerprint=fingerprint, crossed=crossed)
@@ -1028,6 +1113,7 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             # at its start or end that read as a fingerprint or a label (detector.extra_line_sets); one fingerprint check
             # at most per attempt, as on the other paths (none was made here)
             extra_pool = []
+            progress.start_attempt("extra")
 
             def find_extra(image, step, fingerprint):
                 return detector.find_words(image, step, fingerprint=fingerprint, extra=True)
@@ -1035,6 +1121,7 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             other, _, _ = search(find_extra, gray, progress, on_word, extra_pool, spare_line)
             if other is not None:
                 if other.analyze().status == "valid":
+                    progress.stage("guard")
                     guard(other)
                 if other.fingerprint_crop is not None:
                     other = check_fingerprint(other, extra_pool, progress, budget=budget, now=now[crossed])
@@ -1044,9 +1131,11 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
                 if reading is not None and other.layout.extra_lines_strong:
                     # rows read as a fingerprint (strict thresholds) or a label, not verified without them
                     reading.extra_lines = True
+            progress.start_attempt("first")
         if reading is None:
             return None, not_found
         if reading.analyze().status == "valid":
+            progress.stage("guard")
             guard(reading)
         if reading.fingerprint_crop is not None and getattr(reading.layout, "fingerprint_optional", False):
             # a row left out across the columns tried as the fingerprint: kept only if it matches a seed read
@@ -1170,14 +1259,17 @@ def fingerprint_candidates(pool: list) -> list:
 
 
 
-def match_fingerprints(check, group: list, progress: Progress):
+def match_fingerprints(check, group: list, progress: Progress, offset: int = 0, total: int = None):
     """
         Fingerprints of the seeds of `group` (seed, word readings, ...)
         compared with the line of `check`, in one pass of the networks'
-        outputs: the index of the first one that matches, or None.
+        outputs: the index of the first one that matches, or None. Each seed
+        is reported as stage "fp_check", numbered from `offset` + 1 out of
+        `total` (default: the size of `group`), for display only.
     """
     fingerprints = []
     for candidate in group:
+        progress.stage("fp_check", offset + len(fingerprints) + 1, total or len(group))
         fingerprints.append(fingerprint.seed_fingerprint(candidate[0]))
         progress.step(FINGERPRINT_COST)
     check.checked += len(group)
@@ -1207,17 +1299,26 @@ def check_fingerprint(reading: SeedReading, pool: list, progress: Progress, trim
         `budget.pending` (see FingerprintBudget), the reading being returned
         as if none of them matched.
     """
+    progress.stage("fp_read")
     crops = []
     for crop in [reading.fingerprint_crop] + list(getattr(reading, "fingerprint_others", [])):
         # two fingerprint lines (with and without a passphrase): the mean of their probabilities also sums to 1
         w, h = crop.size
         cut = round(FINGERPRINT_TRIM * h) if trim else 0
         crops += [crop] + ([crop.crop((0, cut, w, h)), crop.crop((0, 0, w, h - cut))] if cut else [])
-    inks = [(c, ink) for c, ink in ((c, normalize_word(c)) for c in crops) if ink is not None]
+    inks = []
+    for i, c in enumerate(crops):
+        progress.stage("fp_read", i + 1, len(crops))
+        ink = normalize_word(c)
+        if ink is not None:
+            inks.append((c, ink))
     if not inks:
         return reading
-    check = fingerprint.FingerprintCheck([fingerprint.FingerprintReading(fingerprint_log_probs(c, ink))
-                                          for c, ink in inks])
+    readings = []
+    for i, (c, ink) in enumerate(inks):
+        progress.stage("fp_read", i + 1, len(inks))
+        readings.append(fingerprint.FingerprintReading(fingerprint_log_probs(c, ink)))
+    check = fingerprint.FingerprintCheck(readings)
     budget = budget or FingerprintBudget()
     line = tuple((c.size, hash(c.tobytes())) for c in crops)
     candidates = [c for c in fingerprint_candidates(pool) if (tuple(c[0]), line) not in budget.compared]
@@ -1230,10 +1331,10 @@ def check_fingerprint(reading: SeedReading, pool: list, progress: Progress, trim
     progress.expect(len(candidates) * FINGERPRINT_COST)
     matched = None
     # the chosen seed first, then the others together (one pass of the networks' outputs for all of them)
-    for group in (candidates[:1], candidates[1:]):
+    for offset, group in ((0, candidates[:1]), (1, candidates[1:])):
         if matched or not group:
             continue
-        i = match_fingerprints(check, group, progress)
+        i = match_fingerprints(check, group, progress, offset, len(candidates))
         if i is not None:
             matched = group[i]
     if matched is not None:

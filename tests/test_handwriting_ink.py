@@ -99,3 +99,13 @@ def test_bridged_columns_none_for_a_list_in_columns():
     rows = range(40, 160, 20)
     boxes = [box(0, 60, c) for c in rows] + [box(260, 320, c) for c in rows]
     assert detector.bridged_columns(boxes) is None
+
+
+def test_ink_extend_reports_each_line():
+    # display only: one call per line, in reading order, with the number of lines
+    im = page(range(100, 300, 4))
+    left = [box(100, 140, 50), box(100, 140, 80)]
+    right = [box(260, 300, 50)]
+    seen = []
+    detector.ink_extend(reach(im), [left, right], left + right, on_line=lambda done, total: seen.append((done, total)))
+    assert seen == [(1, 3), (2, 3), (3, 3)]

@@ -745,20 +745,24 @@ class InkReach:
 
 
 def ink_extend(reach: "InkReach", columns: list[list[Box]], others: list[Box], skip: set = frozenset(),
-               gap: float = INK_GAP):
+               gap: float = INK_GAP, on_line=None):
     """
         Extends every line of `columns` (in place) by the ink of its row
         (InkReach.reach), up to the nearest box of `others` on its row (word,
         number or line) and to the start of the next column. `skip`: indices
         of lines (in reading of the columns one after the other) not extended;
-        `gap`: see InkReach.reach.
+        `gap`: see InkReach.reach; `on_line(done, total)` is called before each
+        line (display only).
     """
     starts = [min(b.a0 for b in c) for c in columns]
+    total = sum(len(c) for c in columns)
     k = 0
     for ci, column in enumerate(columns):
         following = min((s for s in starts if s > starts[ci]), default=math.inf)
         found = []
         for b in column:
+            if on_line is not None:
+                on_line(k + 1, total)
             found.append(ink_line(reach, b, others, following, gap) if k not in skip else (b.a0, b.a1))
             k += 1
         if len(column) >= MIN_COLUMN_LINES:
@@ -1596,6 +1600,16 @@ def order_by_numbers(orders: list[list[int]], probabilities: dict) -> list[list[
 _detections = {}
 
 
+def stage(step, *args):
+    """
+        Reports a stage of the reading to `step` if it takes them
+        (handwriting.Progress.stage), for display only.
+    """
+    report = getattr(step, "stage", None)
+    if report is not None:
+        report(*args)
+
+
 def detections(image: Image.Image, step) -> Detection:
     """
         Detection of the document on `image` (see find_words), kept for a
@@ -1604,10 +1618,12 @@ def detections(image: Image.Image, step) -> Detection:
     key = (id(image), image.size)
     if key not in _detections:
         _detections.clear()
+        stage(step, "find")
         det = detect(image)
         step(DETECTOR_COST)
         region = document_region(det, image.size)
         if region:
+            stage(step, "closer")
             first, det = det, detect(image, region)
             det.first = first
             step(DETECTOR_COST)
@@ -1642,6 +1658,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         another document).
     """
     det = detections(image, step)
+    stage(step, "lines")
     size = det.maps.shape[2], det.maps.shape[1]
     stats = InkStats(image, det)
     if crossed:
@@ -1791,7 +1808,8 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     # every line extended by the ink of its row, up to the boxes around it (words found only by the ink of an empty
     # numbered slot are left as found)
     ink_extend(det.ink_reach, columns, [b for b in det.words if b.score > 0] + list(det.numbers)
-               + [b for c in columns for b in c], anchored["synthetic"] if anchored else frozenset())
+               + [b for c in columns for b in c], anchored["synthetic"] if anchored else frozenset(),
+               on_line=lambda done, total: stage(step, "lines", done, total))
     spare = spare_first = None
     hypothesis = False
     others, removed_lines, strong = [], [], False
@@ -1900,7 +1918,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         outside = group_lines(left)
         # a line of digits partly missed by the word map (its first or last digits): extended by the ink of its row
         ink_extend(det.ink_reach, outside, [b for b in det.words if b.score > 0] + list(det.numbers) + lines,
-                   gap=INK_DIGIT_GAP)
+                   gap=INK_DIGIT_GAP, on_line=lambda done, total: stage(step, "lines", done, total))
         tried = sorted((line for column in outside for line in column
                         if (line.a1 - line.a0) >= FINGERPRINT_MIN_LENGTH * h),
                        key=lambda line: -(line.a1 - line.a0))[:FINGERPRINT_MAX_LINES]
@@ -2013,6 +2031,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         if k not in read_numbers:
             q = det.to_photo(linked[k].quad(NUMBER_CROP_MARGINS))
             step(NUMBER_COST)
+            stage(step, "numbers", len(read_numbers) + 1, len(linked))
             read_numbers[k] = number_probabilities(image, q, fill)
         return read_numbers[k]
 

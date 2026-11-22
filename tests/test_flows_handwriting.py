@@ -1,5 +1,6 @@
 import io
 import sys
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -420,7 +421,7 @@ class TestHandwritingFlows(FlowTest):
     def test_read_function_calls_engine(self):
         """
         The reading screen's function decodes the photo upright and in grayscale, shows it,
-        and passes it to `read_seed` with the screen's progress and word callbacks.
+        and passes it to `read_seed` with the screen's progress, word and stage callbacks.
         """
         reading = StubReading(VALID_MNEMONIC)
         engine = MagicMock()
@@ -435,7 +436,8 @@ class TestHandwritingFlows(FlowTest):
         photo = engine.read_seed.call_args.args[0]
         assert photo.mode == "L" and photo.size == (1944, 2592)
         screen.show_photo.assert_called_once_with(photo)
-        engine.read_seed.assert_called_once_with(photo, progress=screen.report_progress, on_word=screen.show_word)
+        engine.read_seed.assert_called_once_with(photo, progress=screen.report_progress, on_word=screen.show_word,
+                                                  on_stage=screen.show_stage)
         assert destination.View_cls == handwritten_views.HandwrittenStatusView
         assert destination.view_args["review"].reading is reading
         assert destination.skip_current_view
@@ -590,9 +592,137 @@ class TestHandwrittenReadingScreen(HandwrittenScreenTestBase):
         screen, result = self.run_screen(read_function)
 
         assert result == "result"
-        assert fractions == [0.5]
+        # The first attempt fills ATTEMPT_SHARE of the bar
+        assert fractions == [pytest.approx(0.5 * screen.ATTEMPT_SHARE)]
         # The last image before the next screen shows the full bar
         assert screen.fraction == 1.0
+
+
+    def test_bar_never_goes_back_across_attempts(self):
+        """
+        A new attempt is said in words; the bar goes on from where it is, in the part
+        of what is left that the attempt can fill, and never goes back.
+        """
+        shown = []
+
+        def read_function(screen):
+            screen.show_stage("attempt:first")
+            for f in (0.2, 0.6, 0.9, 0.97):
+                screen.report_progress(f)
+                shown.append(screen.fraction)
+            screen.show_stage("attempt:extra")
+            assert screen.context == "Try 2: another layout"
+            for f in (0.975, 0.98, 0.99, 0.999):
+                screen.report_progress(f)
+                shown.append(screen.fraction)
+            screen.show_stage("attempt:first")
+            assert screen.context == ""
+            screen.show_stage("attempt:crossed")
+            assert screen.context == "Try 3: no crossed-out words"
+            # an attempt taken up again keeps its number
+            screen.show_stage("attempt:extra")
+            assert screen.context == "Try 2: another layout"
+            screen.show_stage("attempt:crossed")
+            screen.report_progress(0.9995)
+            shown.append(screen.fraction)
+            return None
+
+        screen, _ = self.run_screen(read_function)
+
+        assert shown == sorted(shown) and shown[-1] < 1.0
+        # the second attempt moves the bar visibly (several pixels of 224), unlike the progress reported
+        assert shown[7] - shown[3] > 0.05
+
+
+    def test_stage_lines(self):
+        """
+        The second line says the step under way and its counter; the first one the
+        document found, during the first attempt. The word outlined is shown with its
+        first reading.
+        """
+        layout = MagicMock(count=12, kind="list")
+        layout.outline.side_effect = lambda k: [(100, 200 + 100 * k), (900, 200 + 100 * k), (900, 280 + 100 * k), (100, 280 + 100 * k)]
+        seen = []
+
+        def read_function(screen):
+            screen.show_photo(Image.new("L", (1944, 2592), 200))
+            seen.append(screen.action)
+            screen.show_stage("attempt:first")
+            screen.show_stage("numbers", 3, 12)
+            seen.append((screen.action, screen.counter))
+            screen.show_stage("spare", 4)
+            seen.append((screen.action, screen.counter))
+            screen.show_stage("words", 5, 12, layout, 4)
+            seen.append((screen.context, screen.action, screen.counter, screen.word))
+            screen.show_word(layout, 4, MagicMock(candidates=[("humor", 0.0)]))
+            screen.show_stage("words2", 1, 12, layout, 0)
+            seen.append((screen.action, screen.word))
+            screen.show_stage("words2", 5, 12, layout, 4)
+            seen.append((screen.action, screen.word))
+            screen.show_stage("fp_check", 2, 3)
+            seen.append((screen.action, screen.counter))
+            screen._render_reading()
+            return None
+
+        self.run_screen(read_function)
+
+        assert seen == [
+            "Finding the words",
+            ("Reading line numbers", "3/12"),
+            ("Looking for a fingerprint", "4"),
+            ("12 lines found", "Reading the words", "5/12", None),
+            ("Second reading", (0, 12, "…")),
+            ("Second reading", (4, 12, "humor")),
+            ("Checking the fingerprint", "2/3"),
+        ]
+
+
+    def test_new_attempt_starts_from_the_photo(self):
+        """
+        A new hypothesis shows the whole photo again, then its own area of the words;
+        the first one taken up again shows what it showed.
+        """
+        first = MagicMock(count=12, kind="list")
+        first.outline.side_effect = lambda k: [(100, 200 + 100 * k), (900, 200 + 100 * k), (900, 280 + 100 * k), (100, 280 + 100 * k)]
+        other = MagicMock(count=12, kind="list")
+        other.outline.side_effect = lambda k: [(150, 300 + 100 * k), (950, 300 + 100 * k), (950, 380 + 100 * k), (150, 380 + 100 * k)]
+        seen = []
+
+        def read_function(screen):
+            screen.show_photo(Image.new("L", (1944, 2592), 200))
+            whole = screen.whole
+            screen.show_stage("attempt:first")
+            screen.show_word(first, 11, MagicMock(candidates=[("zoo", 0.0)]))
+            outlined, word = screen.outlined, screen.word
+            screen.report_progress(0.9)
+            screen.show_stage("attempt:extra")
+            seen.append(screen.current_image() is whole and screen.word is None)
+            screen.show_word(other, 0, MagicMock(candidates=[("abandon", 0.0)]))
+            seen.append(screen.outlined == (other, 0) and screen.current_image() is not whole)
+            screen.show_stage("attempt:first")
+            seen.append((screen.outlined, screen.word, screen.context) == (outlined, word, "12 lines found"))
+            return None
+
+        self.run_screen(read_function)
+
+        assert seen == [True, True, True]
+
+
+    def test_redraws_while_nothing_is_reported(self):
+        """
+        The screen is redrawn at least every IDLE_INTERVAL seconds, the ribs of the bar
+        moved, even when the reading reports nothing.
+        """
+        from seedsigner.gui.screens.handwritten_screens import HandwrittenReadingScreen
+
+        def read_function(screen):
+            time.sleep(2.5 * HandwrittenReadingScreen.IDLE_INTERVAL)
+            return None
+
+        screen, _ = self.run_screen(read_function)
+
+        # two idle redraws at least, plus the last image
+        assert self.mock_renderer.show_image.call_count >= 3
 
 
     def test_photo_and_words_shown(self):
@@ -623,6 +753,114 @@ class TestHandwrittenReadingScreen(HandwrittenScreenTestBase):
         from PIL import ImageColor
         from seedsigner.gui.components import GUIConstants
         assert ImageColor.getrgb(GUIConstants.ACCENT_COLOR) in screen.image.getdata()
+
+
+    def test_trail_of_the_words_read(self):
+        """
+        The words already read in the pass stay outlined in TRAIL_COLOR, the word read
+        in the accent color; a new pass starts a new trail.
+        """
+        from PIL import ImageColor
+        from seedsigner.gui.components import GUIConstants
+        layout = MagicMock(count=12, kind="list", numbers_linked=12)
+        layout.outline.side_effect = lambda k: [(100, 200 + 200 * k), (900, 200 + 200 * k), (900, 360 + 200 * k), (100, 360 + 200 * k)]
+        seen = []
+
+        def read_function(screen):
+            screen.show_photo(Image.new("L", (1944, 2592), 200))
+            trail, accent = ImageColor.getrgb(screen.TRAIL_COLOR), ImageColor.getrgb(GUIConstants.ACCENT_COLOR)
+
+            def rows(color):
+                # rows of the thumbnail holding the color
+                image = screen.current_image()
+                return {y for y in range(image.height) for x in range(image.width) if image.getpixel((x, y)) == color}
+
+            screen.show_word(layout, 0, MagicMock(candidates=[("abandon", 0.0)]))
+            seen.append((len(rows(trail)), len(rows(accent)) > 0))
+            for k in range(1, 4):
+                screen.show_word(layout, k, MagicMock(candidates=[("abandon", 0.0)]))
+            # three words read before the one outlined, drawn on the thumbnail of the pass
+            seen.append(screen.trail[1] == [0, 1, 2, 3] and len(rows(trail)) > 0)
+            first_pass = len(rows(trail))
+            screen.show_stage("words2", 1, 12, layout, 0)
+            seen.append(screen.trail[1] == [0] and len(rows(trail)) < first_pass)
+            return None
+
+        self.run_screen(read_function)
+
+        assert seen == [(0, True), True, True]
+
+
+    def test_redraw_on_each_word(self):
+        """
+        A change of the word outlined is drawn WORD_INTERVAL seconds after the last
+        redraw; other changes RENDER_INTERVAL seconds after it.
+        """
+        layout = MagicMock(count=12, kind="list")
+        layout.outline.side_effect = lambda k: [(100, 200), (900, 200), (900, 280), (100, 280)]
+        seen = []
+
+        def read_function(screen):
+            screen.WORD_INTERVAL = 0.2
+            screen.show_word(layout, 0, MagicMock(candidates=[("abandon", 0.0)]))
+            shown, version = screen.outlined, screen.version
+            screen.show_word(layout, 1, MagicMock(candidates=[("ability", 0.0)]))
+            seen.append(screen.render_due(10.25, 10.0, version, shown))
+            seen.append(screen.render_due(10.15, 10.0, version, shown))
+            # a change of the counter only
+            screen.show_stage("spare", 2)
+            seen.append(screen.render_due(10.25, 10.0, version, screen.outlined))
+            seen.append(screen.render_due(10.75, 10.0, version, screen.outlined))
+            seen.append(screen.render_due(10.5, 10.0, screen.version, screen.outlined))
+            return None
+
+        self.run_screen(read_function)
+
+        assert seen == [True, False, False, True, False]
+
+
+    def test_word_text_on_a_layout_not_confirmed(self):
+        """
+        A list with numbers on some of its lines only is a hypothesis: the text of its
+        words is shown as UNCONFIRMED_WORD says. Cards, lists numbered on every line and
+        complete lists without numbers are confirmed.
+        """
+        from seedsigner.gui.screens.handwritten_screens import HandwrittenReadingScreen
+        layouts = [
+            MagicMock(kind="list", count=21, numbers_linked=14, numbers_incoherent=False, complete=False),
+            MagicMock(kind="list", count=12, numbers_linked=12, numbers_incoherent=False, complete=False),
+            MagicMock(kind="list", count=24, numbers_linked=0, numbers_incoherent=False, complete=True),
+            MagicMock(kind="list", count=24, numbers_linked=24, numbers_incoherent=True, complete=True),
+            MagicMock(kind="card12", count=12, numbers_linked=0, numbers_incoherent=False, complete=False),
+        ]
+        for layout in layouts:
+            layout.outline.side_effect = lambda k: [(100, 200), (900, 200), (900, 280), (100, 280)]
+        seen = []
+        pixels = {}
+
+        def read_function(screen):
+            from PIL import ImageDraw
+            screen.renderer.canvas = Image.new("RGB", (240, 240))
+            screen.renderer.draw = ImageDraw.Draw(screen.renderer.canvas)
+            seen.extend(screen.confirmed(layout) for layout in layouts)
+            screen.show_photo(Image.new("L", (1944, 2592), 200))
+            for shown in ("show", "dim", "hide"):
+                screen.UNCONFIRMED_WORD = shown
+                screen.drawn = (None, None)
+                screen.show_word(layouts[0], 3, MagicMock(candidates=[("lion", 0.0)]))
+                screen._render_reading()
+                left, top, right, bottom = screen.area
+                region = screen.renderer.canvas.crop((left + screen.image.width, top, right, bottom))
+                pixels[shown] = (max(sum(p) for p in region.getdata()), sum(1 for p in region.getdata() if sum(p) > 60))
+            return None
+
+        with patch.object(HandwrittenReadingScreen, "UNCONFIRMED_WORD", "show"):
+            self.run_screen(read_function)
+
+        assert seen == [False, True, True, False, True]
+        # white text, gray text, number only (gray)
+        assert pixels["show"][0] > pixels["dim"][0] == pixels["hide"][0]
+        assert pixels["dim"][1] > pixels["hide"][1] > 0
 
 
     def test_reraises_reading_error(self):

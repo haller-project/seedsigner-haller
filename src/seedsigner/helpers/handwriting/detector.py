@@ -76,9 +76,6 @@ CARD_MIN_COMPACTNESS = 0.55   # share of its oriented bounding rectangle covered
 NUMBER_CHECK = True           # numbers read that contradict the order of the words make the list incoherent
                               # (find_words: layout.numbers_incoherent)
 NUMBER_SURE = 0.9             # probability of the value of a number read taken into account by that check
-EXTRA_LINES_ANY = False       # (variant, off) rows of a list tried as a label or a fingerprint (layout.extra_lines)
-                              # also when words are left out of the lines; off: only when every word box is on a line,
-                              # as since 986e493 (task-4434: no seed gained on the benches, up to +88 s on the Pi)
 BEYOND_TEXT = 0.3             # writing of a card farther than this many word heights beyond its text: card cut there
 ZOOM_SHARE = 0.5              # documents covering less of the photo are detected again on their region (0.4 before
                               # the detector of 21/11/2026)
@@ -1680,9 +1677,9 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         end that read as a fingerprint, a label or no word (see
         extra_line_sets and the second part below); WordsNotFound if no such
         set of rows is found. `layout.extra_lines` (without `extra`): a list
-        numbered on most of its lines, with a valid count, some of whose lines
-        have no number while such a set of rows exists: worth reading with
-        `extra` (handwriting.read_seed).
+        numbered on most of its lines, with a valid count, every word box on
+        one of its lines, some of whose lines have no number while such a set
+        of rows exists: worth reading with `extra` (handwriting.read_seed).
         `layout.numbers_incoherent`: numbers read and linked to their line that
         contradict every order of the words left (see NUMBER_CHECK). With
         `merged`, the card kernels are ignored: every word is on one list (a
@@ -2120,8 +2117,12 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     layout.fingerprint_hypothesis = hypothesis
     layout.fingerprint_optional = optional
     layout.fingerprint_single = optional and loose_line is not None
-    # (EXTRA_LINES_ANY False: as before, only when every word box is on a line)
-    layout.extra_lines = (not extra if EXTRA_LINES_ANY else not words_left) and g < 0 and anchored is None and spare is None and fingerprint is not None \
+    # The second reading without label or fingerprint rows (read_seed, `extra`) is offered only when every word box is
+    # on a line of the list: a word left out (a title, words of another document) closes it. This was the behaviour
+    # since 986e493, through a variable `extra` reused for the words left out; written out here. Offering it also when
+    # words are left out (task-4434, C6) gained no seed on the frozen benches and cost up to 88 s more on a Pi Zero
+    # (a photo already read, read again for nothing).
+    layout.extra_lines = not words_left and g < 0 and anchored is None and spare is None and fingerprint is not None \
         and len(linked) >= MIN_ANCHOR_NUMBERS and len(linked) < count and bool(extra_line_sets(groups[g]))
     layout.extra_lines_removed = len(removed_lines)
     layout.extra_lines_strong = strong

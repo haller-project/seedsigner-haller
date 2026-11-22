@@ -327,6 +327,46 @@ across the columns bring most of the gain (fingerprints written under or
 above a list in columns). On a Pi Zero the ink strips add about 1.5 s per
 photo; a few pages refused before and now read take 40 to 50 s more.
 
+### Numbers that contradict the order
+
+Once the order of the words is decided, the numbers the engine has already
+read (no number is read for this check) are compared with the position of
+their line (`NUMBER_CHECK`, `numbers_contradict`). Only sure numbers count:
+a value read with a probability of at least `NUMBER_SURE` (0.9), linked to
+its line by the link map (`LINK_THRESHOLD`), not by distance alone. The
+list is incoherent when, in the order left that fits them best, at least
+two sure numbers, and at least half of them, differ from their position:
+a list that misses its first words (numbers starting at 6), a fingerprint
+whose digits were taken for numbers, duplicated numbers.
+
+An incoherent list is not taken as read. If a card kernel holds words (the
+words of another document, or a part of the sheet taken for a card), the
+photo is read again as one list with every word, card kernels ignored
+(`find_words(merged=True)`); that reading is kept if at least
+`MIN_NUMBERS_READ` sure numbers are read on it and agree with its order.
+Otherwise the first reading is kept with every word uncertain and the trust
+level Low (`numbers_incoherent`). A verified fingerprint always prevails.
+
+Word crops read during one reading of a photo are kept by content
+(`WORD_CACHE`): a crop read again by another search of the same photo
+(crossed-out words, extra lines, merged list) reuses its ink map and the
+outputs of the networks, which depend on the crop alone. No reading
+changes; the second searches cost less on a Pi Zero.
+
+Two variants stay in the code, off: `CARD_SHAPE` (a card kernel holds a
+document only if it has the size and the compactness of a card) frees the
+words of SeedSigner cards cut by the frame on the benches;
+`EXTRA_LINES_ANY` (the search for label and fingerprint rows also when
+words are left out of the lines) gains nothing on the benches and costs up
+to 88 s more on a Pi Zero.
+
+Measured on the 19 frozen benches of the decision tools (22/11/2026): no
+false verified seed, no loss; 1 more exact and verified seed on the photos
+of the site (a list of 24 words in three numbered columns whose first five
+words were taken for a card: read 21 lines, now 24 words with the
+fingerprint verified), 1 to 2 more on the fingerprint and trap benches;
+worst estimated time on a Pi Zero 42.8 → 37.7 s on the real photos.
+
 ### Check of the fingerprint
 
 When a fingerprint line was left out, it is read again by the fingerprint

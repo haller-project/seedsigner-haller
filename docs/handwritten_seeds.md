@@ -21,7 +21,7 @@
   freed the words of real cards cut by the frame of the photo.
 - Two bands of words without line numbers whose order stays ambiguous get the
   low trust level: every word is to be compared.
-- Words abbreviated to 4 letters are read less well than full words (108 of
+- Words abbreviated to 4 letters are read less well than full words (109 of
   400 abbreviated test pages exact).
 
 
@@ -718,7 +718,7 @@ vectors.
 ## Accuracy
 
 Engine of this branch as published with Haller-1 (benches of 22/11/2026, on
-the code of `detector-prod` 978f1fa, whose comments only differ): word
+the code of the device at the release, whose comments only differ): word
 detector alone, fingerprint check, trust gauge and the changes described in
 the sections above. Seeds verified by their fingerprint (wrong ones) / seeds
 exact / words read correctly / pages not found:
@@ -726,26 +726,26 @@ exact / words read correctly / pages not found:
 | Photos | Kind | Result |
 |---|---|---|
 | Real photos, test half (35) | test | 0 (0) / 30 / 485 / 1 |
-| Blank cards of other makers photographed, writing simulated (70) | test | 0 (0) / 34 / 716 / 12 |
+| Blank cards of other makers photographed, writing simulated (70) | test | 0 (0) / 34 / 716 / 11 |
 | Hard real photos taken by the device (10) | test | 4 (0) / 7 / 99 / 1 |
-| Usual simulated photos (1 560) | test | 0 (0) / 1 403 / 21 065 / 45 |
-| Badly framed (1 167) | test | 0 (0) / 641 / 11 699 / 176 |
+| Usual simulated photos (1 560) | test | 0 (0) / 1 403 / 21 065 / 44 |
+| Badly framed (1 167) | test | 0 (0) / 641 / 11 699 / 172 |
 | Red team (845) | test | 0 (0) / 556 / 8 680 / 47 |
-| Supports kept apart (900) | test | 0 (0) / 277 / 6 446 / 272 |
-| Several columns (240) | test | 0 (0) / 45 / 1 044 / 114 |
-| Tight columns (200) | test | 0 (0) / 61 / 1 452 / 69 |
-| Lists with a fingerprint line (1 200) | test | 397 (0) / 963 / 16 177 / 78 |
-| Red team with a fingerprint line (838) | test | 478 (0) / 586 / 8 686 / 60 |
-| Numbered lists with a fingerprint line (800) | test | 564 (0) / 639 / 10 377 / 58 |
-| Traps around the fingerprint line (800) | test | 541 (0) / 578 / 8 154 / 130 |
-| Labels before the fingerprint (400) | test | 97 (0) / 121 / 1 628 / 254 |
-| Abbreviated words (400) | test | 0 (0) / 108 / 2 410 / 122 |
+| Supports kept apart (900) | test | 0 (0) / 277 / 6 446 / 258 |
+| Several columns (240) | test | 0 (0) / 45 / 1 044 / 113 |
+| Tight columns (200) | test | 0 (0) / 61 / 1 441 / 68 |
+| Lists with a fingerprint line (1 200) | test | 397 (0) / 970 / 16 417 / 57 |
+| Red team with a fingerprint line (838) | test | 478 (0) / 593 / 8 894 / 39 |
+| Numbered lists with a fingerprint line (800) | test | 564 (0) / 654 / 10 824 / 31 |
+| Traps around the fingerprint line (800) | test | 541 (0) / 586 / 8 419 / 100 |
+| Labels before the fingerprint (400) | test | 97 (0) / 127 / 1 700 / 248 |
+| Abbreviated words (400) | test | 0 (0) / 109 / 2 422 / 116 |
 | Real photos, development half (65) | tuning | 25 (0) / 53 / 771 / 2 |
-| Photos sent to the public test, before 2026-11-23 (81) | tuning | 10 (0) / 62 / 1 085 / 6 |
-| Simulated tuning pages (1 978) | tuning | 0 (0) / 792 / 16 753 / 419 |
-| Tuning lists with a fingerprint line (779) | tuning | 296 (0) / 608 / 9 885 / 42 |
-| Tuning labels (200) | tuning | 37 (0) / 44 / 592 / 143 |
-| Tuning abbreviated words (200) | tuning | 0 (0) / 62 / 1 465 / 50 |
+| Photos sent to the public test, before 2026-11-23 (81) | tuning | 10 (0) / 63 / 1 109 / 5 |
+| Simulated tuning pages (1 978) | tuning | 0 (0) / 793 / 16 794 / 397 |
+| Tuning lists with a fingerprint line (779) | tuning | 296 (0) / 611 / 10 001 / 32 |
+| Tuning labels (200) | tuning | 37 (0) / 50 / 678 / 134 |
+| Tuning abbreviated words (200) | tuning | 0 (0) / 63 / 1 459 / 44 |
 
 **0 wrong seeds among 2 449 verified** (2 081 on the test benches, 368 on the
 tuning ones); at most 3 seeds are compared with the fingerprint per photo, a
@@ -759,8 +759,8 @@ side are given to the engine upright, turned without loss.
 
 On a Raspberry Pi Zero, reading alone (the running application adds about
 5 %), the 17 real photos of the reference set (13 taken by the device) take
-5.9 to 55.2 s (median 13.6 s): 12-word cards 5.9 to 8.7 s, 12-word lists
-verified by their fingerprint 13.6 to 24.5 s, a list in three columns 55.2 s.
+5.9 to 54.2 s (median 13.6 s): 12-word cards 5.9 to 8.6 s, 12-word lists
+verified by their fingerprint 13.6 to 25.2 s, a list in three columns 54.2 s.
 
 Measured on 21/11/2026 against the previous engine (rules of `page.py`, the
 detector when they found no valid seed). Seeds verified by their fingerprint

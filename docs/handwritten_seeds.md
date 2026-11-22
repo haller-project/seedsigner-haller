@@ -265,6 +265,26 @@ as before. The line left out is kept with the layout (`layout.fingerprint`).
 The official SeedSigner card has no such line: its fingerprint box is on the
 back.
 
+### Labels and lines without a number
+
+Some lists carry a label on a line of its own (« fingerprint » above the
+fingerprint, « Seed words », « 12 words »...), or a fingerprint the detector
+cuts in pieces. When a list is numbered on most of its lines with a valid
+count but some lines carry no number, and its reading is not verified, it is
+read again without one or two rows at its start or end
+(`detector.extra_line_sets`: the first, the last, the first two, the last
+two, the first and the last; rows of at most 3 pieces) whose removal leaves a
+valid number of words. Each row left out must read as a fingerprint, as a
+label (`fingerprint.LABELS`, CTC likelihood of the best label against the
+best BIP39 word, `LABEL_MARGIN`) or, next to a fingerprint, as no word
+(`handwriting.line_role`). Two fingerprint lines are checked together (mean
+of their probabilities, which still sum to 1). At most one fingerprint check
+is made per attempt and at most 3 seeds are checked: the bound of 1e-6 per
+photo below is unchanged. A reading left with rows read as a fingerprint or a
+label and not verified is trusted low. A list not found is not read again
+this way: measured on a Pi Zero, it took 26 to 93 s on pages refused
+without it in 4.5 to 33.5 s.
+
 ### Check of the fingerprint
 
 When a fingerprint line was left out, it is read again by the fingerprint

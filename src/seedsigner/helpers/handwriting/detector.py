@@ -50,7 +50,7 @@ from PIL import Image, ImageDraw
 from . import native
 from . import page
 from .page import WordLayout, WordsNotFound
-from .preprocess import normalize_word
+from .preprocess import box_mean, normalize_word, remove_long_runs
 
 DETECTOR_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "resources", "handwriting",
                              "haller-1-detector.npz")
@@ -153,6 +153,31 @@ FINGERPRINT_NUMBER_GAP = 0.6
 SMALL_WORD_PROBABILITY = 0.2
 SMALL_PIXELS = 4
 SMALL_HEIGHT = 4.8
+
+# Extent of a line along the text by the ink of its row (InkReach): the word map may cover only part of a word (the
+# first or last letters lost: real photos of the site, 22/11/2026). Each line is extended on either side while strokes
+# follow one another, up to the next box of its row, the next column or INK_REACH heights
+INK_REACH = 6.0               # farthest a line is extended on either side, in heights
+INK_GAP = 0.8                 # largest gap between two strokes of one word, in heights (GRID_WORD_GAP: between words)
+INK_DIGIT_GAP = 1.8           # the same for a line tried as the fingerprint (digits written apart: « 0c5 23866 »)
+INK_BAND = 0.3                # strokes are looked for this many heights on either side of the center line
+INK_STRIP = 16                # height of a line in the strip analysed, in pixels (the photo is reduced to it)
+INK_LEVEL = 0.5               # ink: darker than this share of the way from the background to the darkest strokes
+INK_CONTRAST = 24             # gray levels between the background and the strokes of the line below which nothing is done
+INK_RULE = 2.0                # horizontal runs longer than this many heights are ruled or printed lines, not strokes
+INK_DARK = 0.95               # a column of the strip (two heights high) dark on this share of its rows is the edge of
+                              # the sheet or a shadow, not a stroke: a line is never extended across it
+INK_THICK = 0.15              # a stroke covers at least this many heights of the central band, across the text
+INK_EDGE = 0.5                # columns closer than this many heights to a dark column are no strokes
+INK_SHIFT = 0.35              # strokes whose mean height differs by more than this many heights from those of the line
+                              # belong to another line
+INK_ALIGN = 0.5               # a line of a column of MIN_COLUMN_LINES or more is not extended to start more than this many
+                              # heights before the median start of the lines of its column
+INK_MIN_LEAD = 1.0            # the same before the line
+INK_MIN_GROWTH = 0.5           # a side of a line is extended only if it grows by this many heights or more (a letter)
+BRIDGE_ROLES = False          # (variant) a row across the columns is left out only if it also reads as no BIP39 word, a
+                              # label or a fingerprint (handwriting.line_role)
+INK_MIN_WORD = 1.0            # ink at least this long (heights) in an empty numbered slot may be a word (anchored_slots)
 
 # A first or last row of a list holding at most this many pieces is tried as the fingerprint when the other words
 # make a valid count (extra_rows: « FP: 1a2b 3c4d »)
@@ -566,6 +591,171 @@ class InkStats:
 
 
 
+class InkReach:
+    """
+        Strokes along the lines of the photo: extent of a line by the ink of its
+        row (reach), ink of an empty numbered slot (slot; `slots`: used by
+        anchored_slots). The strip of a line
+        is cut from the photo reduced so that a line is about INK_STRIP pixels
+        high (cheap on a Pi Zero); ruled and printed lines are removed.
+    """
+    def __init__(self, image: Image.Image, det: Detection, fill: int, slots: bool = True):
+        self.image, self.det, self.fill, self.slots = image, det, fill, slots
+        self.reduced = {}
+
+
+    def columns(self, box: Box, a0: float, a1: float, reference: tuple[float, float] | None) \
+            -> tuple[np.ndarray, np.ndarray, float] | None:
+        """
+            (inked columns of the central band of `box` between a0 and a1 along
+            the text, columns dark on most of the strip (INK_DARK), strip pixels
+            per output pixel), or None if the strip has too little contrast.
+            The strip is two heights high; the ink level is that of the part
+            `reference` (a0, a1) of the strip, or of the whole strip.
+        """
+        strip = copy_box(box)
+        strip.a0, strip.a1 = a0, a1
+        quad = self.det.to_photo(strip.quad((0.0, 1.0, 1.0)))
+        q = np.array(quad)
+        height = (np.linalg.norm(q[3] - q[0]) + np.linalg.norm(q[2] - q[1])) / 2
+        r = max(1, int(height / (2 * INK_STRIP)))
+        if r not in self.reduced:
+            self.reduced[r] = self.image.reduce(r) if r > 1 else self.image
+        a = np.asarray(rectified_crop(self.reduced[r], [(x / r, y / r) for x, y in quad], self.fill), np.float32)
+        rows, width = a.shape
+        per = width / max(a1 - a0, 1e-6)
+        top, bottom = int(rows * (0.5 - INK_BAND / 2)), int(math.ceil(rows * (0.5 + INK_BAND / 2)))
+        # ink level of the strokes on the central band (a ruled or printed line below the words is darker)
+        if reference is not None:
+            inside = a[top:bottom, max(0, int((reference[0] - a0) * per)):max(1, int(math.ceil((reference[1] - a0) * per)))]
+        else:
+            inside = a[top:bottom]
+        background = float(np.percentile(a, 90))
+        ink = float(np.percentile(inside, 3)) if inside.size else background
+        if background - ink < INK_CONTRAST:
+            return None
+        mask = a < background - INK_LEVEL * (background - ink)
+        dark = mask.mean(0) >= INK_DARK
+        mask = remove_long_runs(mask, max(3, int(INK_RULE * rows / 2)))
+        # isolated pixels (grain of the paper) are no strokes
+        mask &= box_mean(mask.astype(np.float32), 1) >= 2.5 / 9
+        # a stroke crosses at least INK_THICK heights of the band (a ruled line slanted across the strip, cut into short
+        # runs, does not); a column next to a dark one (the edge of the sheet) is no stroke either
+        inked = mask[top:bottom].sum(0) >= max(2, INK_THICK * rows / 2)
+        near = max(1, int(INK_EDGE * rows / 2))
+        dark = np.convolve(dark, np.ones(2 * near + 1), "same") > 0
+        # height of the strokes of each column (mean row of its ink, in heights from the center line)
+        counts = mask.sum(0)
+        middle = np.where(counts > 0, (mask * np.arange(rows)[:, None]).sum(0) / np.maximum(counts, 1), np.nan)
+        self.middle = (middle - rows / 2) / (rows / 2)
+        return inked & ~dark, dark, per
+
+
+    def reach(self, box: Box, before: float, after: float, gap: float = INK_GAP) -> tuple[float, float]:
+        """
+            (a0, a1) of `box` extended while strokes follow one another (gaps of
+            at most `gap` heights) on either side, not beyond `before` and
+            `after` (along the text, output pixels), INK_REACH heights nor a
+            dark column (INK_DARK).
+        """
+        h = box.h
+        lo, hi = max(before, box.a0 - INK_REACH * h), min(after, box.a1 + INK_REACH * h)
+        if lo >= box.a0 and hi <= box.a1:
+            return box.a0, box.a1
+        lo, hi = min(lo, box.a0), max(hi, box.a1)
+        found = self.columns(box, lo, hi, (box.a0, box.a1))
+        if found is None:
+            return box.a0, box.a1
+        inked, dark, per = found
+        i0, i1 = int((box.a0 - lo) * per), min(len(inked) - 1, int((box.a1 - lo) * per))
+        own = np.nonzero(inked[i0:i1 + 1])[0]
+        if not len(own):
+            return box.a0, box.a1
+        # strokes of another line (slanted rows, close lines) lie higher or lower than those of the line
+        level = float(np.nanmedian(self.middle[i0:i1 + 1][own]))
+        inked = inked & (np.abs(np.nan_to_num(self.middle, nan=9.0) - level) <= INK_SHIFT)
+        gap = gap * h * per
+        first, last = i0 + own[0], i0 + own[-1]
+        j = last + 1
+        while j < len(inked) and j - last <= gap and not dark[j]:
+            if inked[j]:
+                last = j
+            j += 1
+        j = first - 1
+        while j >= 0 and first - j <= gap and not dark[j]:
+            if inked[j]:
+                first = j
+            j -= 1
+        a0, a1 = max(lo, lo + first / per - 0.25 * h), min(hi, lo + (last + 1) / per + 0.25 * h)
+        # a side grows only by a letter or more (the box already holds the margins of the word map)
+        # before the line, at least INK_MIN_LEAD (a number missed by the detector is shorter than lost letters)
+        return (a0 if a0 <= box.a0 - INK_MIN_LEAD * h else box.a0), (a1 if a1 >= box.a1 + INK_MIN_GROWTH * h else box.a1)
+
+
+    def slot(self, box: Box) -> tuple[float, float] | None:
+        """
+            (a0, a1) of the longest group of strokes (gaps of at most INK_GAP
+            heights) on the central band of an empty slot, if it is at least
+            INK_MIN_WORD heights long, else None.
+        """
+        found = self.columns(box, box.a0, box.a1, None)
+        if found is None:
+            return None
+        inked, _, per = found
+        columns = np.nonzero(inked)[0]
+        if not len(columns):
+            return None
+        groups = np.split(columns, np.nonzero(np.diff(columns) > INK_GAP * box.h * per)[0] + 1)
+        best = max(groups, key=lambda g: g[-1] - g[0])
+        if (best[-1] + 1 - best[0]) / per < INK_MIN_WORD * box.h:
+            return None
+        return box.a0 + best[0] / per - 0.25 * box.h, box.a0 + (best[-1] + 1) / per + 0.25 * box.h
+
+
+
+def ink_extend(reach: "InkReach", columns: list[list[Box]], others: list[Box], skip: set = frozenset(),
+               gap: float = INK_GAP):
+    """
+        Extends every line of `columns` (in place) by the ink of its row
+        (InkReach.reach), up to the nearest box of `others` on its row (word,
+        number or line) and to the start of the next column. `skip`: indices
+        of lines (in reading of the columns one after the other) not extended;
+        `gap`: see InkReach.reach.
+    """
+    starts = [min(b.a0 for b in c) for c in columns]
+    k = 0
+    for ci, column in enumerate(columns):
+        following = min((s for s in starts if s > starts[ci]), default=math.inf)
+        found = []
+        for b in column:
+            found.append(ink_line(reach, b, others, following, gap) if k not in skip else (b.a0, b.a1))
+            k += 1
+        if len(column) >= MIN_COLUMN_LINES:
+            # the words of a column start together: ink further before the start of most of them is a number missed
+            # by the detector or a margin, not letters
+            start = float(np.median([a0 for a0, _ in found])) - INK_ALIGN * float(np.median([b.h for b in column]))
+            found = [(max(a0, min(b.a0, start)), a1) for b, (a0, a1) in zip(column, found)]
+        for b, (a0, a1) in zip(column, found):
+            if hasattr(b, "ink"):
+                b.ink += (b.a0 - a0) + (a1 - b.a1)
+            b.a0, b.a1 = a0, a1
+
+
+
+def ink_line(reach: "InkReach", b: Box, others: list[Box], following: float = math.inf, gap: float = INK_GAP) \
+        -> tuple[float, float]:
+    """
+        (a0, a1) of line `b` extended by the ink of its row (InkReach.reach) up
+        to the nearest box of `others` on its row and to `following` (start of
+        the next column, along the text).
+    """
+    # any box reaching the height of the line stops it (the words of a slanted line next to it)
+    row = [o for o in others if o is not b and abs(o.c - b.c) < 0.5 * (o.h + b.h)
+           and (o.a1 <= b.a0 + 0.5 * b.h or o.a0 >= b.a1 - 0.5 * b.h)]
+    before = max([o.a1 for o in row if o.middle < b.a0] + [-math.inf])
+    after = min([o.a0 for o in row if o.middle > b.a1] + [following - 0.5 * b.h])
+    return reach.reach(b, before, after, gap)
+
 def with_number(line: Box, numbers: list[Box], after: bool = False) -> Box | None:
     """
         The line widened to the number boxes centered before its start on its
@@ -817,6 +1007,60 @@ def row_words(boxes: list[Box], chained: bool = False) -> list[list[Box]] | None
     if any(b.a1 - b.a0 < MIN_ROW_WORD_LENGTH * h for r in words for b in r):
         return None
     return words
+
+
+def bridged_columns(boxes: list[Box]) -> tuple[list[list[Box]], list[list[Box]]] | None:
+    """
+        Columns of a list whose corridor between two columns is covered only
+        by one or two rows at its start or end (a title or a fingerprint
+        written across the columns: group_lines then finds a single column):
+        the columns of the other boxes (group_lines, or grid_columns) if there
+        are at least two of them, of a valid number of words, and every row
+        left out overlaps a corridor between them, the rows left out together
+        closing one of them (no gap of COLUMN_GAP heights left in it: the
+        columns on either side are merged). The fewest rows left out first (the first, the
+        last, then two): (those columns, the rows left out); None if no such
+        set of rows is found.
+    """
+    if len(boxes) < MIN_GROUP_WORDS + 1:
+        return None
+    h = float(np.median([b.h for b in boxes]))
+    rows = []
+    for b in sorted(boxes, key=lambda b: b.c):
+        if rows and abs(b.c - np.mean([x.c for x in rows[-1]])) < SAME_LINE * max(h, b.h):
+            rows[-1].append(b)
+        else:
+            rows.append([b])
+    n = len(rows)
+    for removed in ([0], [n - 1], [0, 1], [n - 2, n - 1], [0, n - 1]):
+        if n - len(set(removed)) < 2 or len(set(removed)) < len(removed):
+            continue
+        body = [b for i, row in enumerate(rows) if i not in removed for b in row]
+        columns = group_lines([copy_box(b) for b in body])
+        if len(columns) < 2 or sum(len(c) for c in columns) not in page.SEED_LENGTHS:
+            # columns too close for a corridor: a grid of words written in rows
+            columns = grid_columns(body)
+            if columns is None or sum(len(c) for c in columns) not in page.SEED_LENGTHS:
+                continue
+        corridors = [(max(b.a1 for b in columns[i]), min(b.a0 for b in columns[i + 1])) for i in range(len(columns) - 1)]
+        if any(c1 <= c0 for c0, c1 in corridors):
+            continue
+
+        def closes(spans, c0, c1):
+            # the spans leave no gap of COLUMN_GAP heights or more inside the corridor (c0, c1): group_lines merges
+            # the columns
+            edge, widest = c0, 0.0
+            for a0, a1 in sorted(spans):
+                if a1 <= c0 or a0 >= c1:
+                    continue
+                widest, edge = max(widest, a0 - edge), max(edge, a1)
+            return max(widest, c1 - edge) < COLUMN_GAP * h
+
+        out = [b for i in removed for b in rows[i]]
+        if all(any(b.a0 < c1 and b.a1 > c0 for b in rows[i] for c0, c1 in corridors) for i in removed) \
+                and any(closes([(b.a0, b.a1) for b in out], c0, c1) for c0, c1 in corridors):
+            return columns, [rows[i] for i in removed]
+    return None
 
 
 
@@ -1146,10 +1390,31 @@ def anchored_slots(det: Detection, words: list[Box], numbers: list[Box]) -> dict
                 box.a1 = min(following - 0.5 * n.h, box.a0 + SLOT_LENGTH * n.h)
                 box.h = 1.2 * n.h
                 filled = band_max(det.maps[WORD], box) >= WRITTEN
-            slots.append((box, filled, n, not found))
+            slots.append([box, filled, n, not found])
         grid.append(slots)
     flat = [s for column in grid for s in column]
     count = sum(s[1] for s in flat)
+    reach = getattr(det, "ink_reach", None)
+    if count not in page.SEED_LENGTHS and reach is not None and reach.slots:
+        # words too faint for the word map: an empty slot holding strokes (InkReach.slot) on the line of the words is
+        # taken as written, its extent that of the strokes, if the count then becomes valid
+        heights = [s[0].h for s in flat if not s[3]]
+        h = float(np.median(heights)) if heights else 1.2 * float(np.median([s[2].h for s in flat]))
+        inked = []
+        for s in flat:
+            if s[1]:
+                continue
+            box, n = copy_box(s[0]), s[2]
+            box.h = h
+            box.c = n.c + drift[0] * (box.middle - n.middle) + drift[1]
+            found = reach.slot(box)
+            if found is not None:
+                box.a0, box.a1 = found
+                inked.append((s, box))
+        if inked and count + len(inked) in page.SEED_LENGTHS:
+            for s, box in inked:
+                s[0], s[1] = box, True
+            count += len(inked)
     if count == 0:
         return None
     starts = np.cumsum([0] + [len(c) for c in grid])
@@ -1385,6 +1650,9 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         det = copy.copy(det)
         det.words = [b for b in det.words if not any(b is c for c in scribbled)]
         det.numbers = [n for n in det.numbers if not any(with_number(c, [n]) for c in scribbled)]
+    fill = int(np.median(np.asarray(image.reduce(16))))
+    # the second search leaves out words scribbled over: their slots are never filled again by their ink
+    det.ink_reach = InkReach(image, det, fill, slots=not crossed)
     groups, number_groups = {}, {}
     for b in det.words:
         if b.score > 0:
@@ -1460,6 +1728,8 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     ambiguous = any(m[2] >= MIN_OTHER_WORDS and m[1] for m in candidates[1:])
     anchored = None
     if len(number_groups.get(g, [])) >= MIN_ANCHOR_NUMBERS:
+        # empty slots filled by their ink only when the lines alone do not make a valid count
+        det.ink_reach.slots = not crossed and count not in page.SEED_LENGTHS
         anchored = anchored_slots(det, groups[g], number_groups[g])
         if anchored and anchored["count"] in page.SEED_LENGTHS \
                 and (count not in page.SEED_LENGTHS or anchored["count"] == count):
@@ -1475,6 +1745,27 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         aligned = aligned_columns(groups[g])
         if aligned is not None and sum(len(c) for c in aligned) in page.SEED_LENGTHS:
             columns, count = aligned, sum(len(c) for c in aligned)
+    bridged_rows = []
+    if anchored is None and not crossed:
+        # a title or a fingerprint written across the columns: the list read without it (its boxes are then outside
+        # the words, tried as the fingerprint below), if the count is wrong or if it splits the list into more columns
+        # (a count made valid by a column merged into one: the title counted, two words joined into one line); not in the
+        # second search, whose words scribbled over are already left out
+        bridged = bridged_columns(groups[g])
+        if bridged is not None and BRIDGE_ROLES and getattr(fingerprint, "role", None) is not None:
+            # lexical signal too (variant): every row left out reads as no word, a label or a fingerprint
+            fill_ = int(np.median(np.asarray(image.reduce(16))))
+            for row in bridged[1]:
+                line = copy_box(row[0])
+                for b in row[1:]:
+                    line.merge(copy_box(b))
+                crops = [rectified_crop(image, det.to_photo(line.quad(m)), fill_) for m in FINGERPRINT_CROPS]
+                if fingerprint.role(crops)[0] is None:
+                    bridged = None
+                    break
+        if bridged is not None and (count not in page.SEED_LENGTHS or len(bridged[0]) > len(columns)):
+            columns, count = bridged[0], sum(len(c) for c in bridged[0])
+            bridged_rows = bridged[1]
     in_rows = False
     if g < 0 and anchored is None and count not in page.SEED_LENGTHS:
         for chained in (False, True):
@@ -1490,7 +1781,10 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
                 and 2 * sum(touches_frame(det.to_photo(b.quad()), image.size, 8) for b in c) < len(c)]
         if kept and sum(len(c) for c in kept) in page.SEED_LENGTHS:
             columns, count = kept, sum(len(c) for c in kept)
-    fill = int(np.median(np.asarray(image.reduce(16))))
+    # every line extended by the ink of its row, up to the boxes around it (words found only by the ink of an empty
+    # numbered slot are left as found)
+    ink_extend(det.ink_reach, columns, [b for b in det.words if b.score > 0] + list(det.numbers)
+               + [b for c in columns for b in c], anchored["synthetic"] if anchored else frozenset())
     spare = spare_first = None
     hypothesis = False
     others, removed_lines, strong = [], [], False
@@ -1547,7 +1841,11 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
             if not any(covers(t[0], line.center) for t in tried):
                 tried.append((line, pieces, rest))
         accepted, crops = [], {}
+        around = [b for b in det.words if b.score > 0] + list(det.numbers) + [b for c in columns for b in c]
         for t, (line, pieces, rest) in enumerate(tried):
+            # digits partly missed by the word map: the line extended by the ink of its row, digits written apart
+            line = copy_box(line)
+            line.a0, line.a1 = ink_line(det.ink_reach, line, around, gap=INK_DIGIT_GAP)
             # the whole line, then its last word alone (a fingerprint written after a label: "fp: 1a2b3c4d")
             wide = with_number(line, number_groups.get(g, []), after=True)
             for box, margins in itertools.product([wide] * (wide is not None) + [line] + pieces[-1:] * (len(pieces) > 1),
@@ -1592,7 +1890,11 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
                  and not any(covers(line, b.center) for line in lines)
                  and not any(covers(w, b.center) or covers(b, w.center) for w in det.words)]
         h = float(np.median([b.h for b in lines]))
-        tried = sorted((line for column in group_lines(left) for line in column
+        outside = group_lines(left)
+        # a line of digits partly missed by the word map (its first or last digits): extended by the ink of its row
+        ink_extend(det.ink_reach, outside, [b for b in det.words if b.score > 0] + list(det.numbers) + lines,
+                   gap=INK_DIGIT_GAP)
+        tried = sorted((line for column in outside for line in column
                         if (line.a1 - line.a0) >= FINGERPRINT_MIN_LENGTH * h),
                        key=lambda line: -(line.a1 - line.a0))[:FINGERPRINT_MAX_LINES]
         accepted = []
@@ -1605,8 +1907,26 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
                 if fingerprint(crop):
                     accepted.append((line, crop))
                     break
+        margin_of = getattr(fingerprint, "margin", None)
+        optional = False
+        if not accepted and bridged_rows and margin_of is not None:
+            # a row left out across the columns (bridged_columns) read best as 8 hexadecimal digits by the fingerprint
+            # network: checked as the fingerprint, the list kept as read if it matches no seed (layout.fingerprint_optional)
+            passing = []
+            for line in tried:
+                if any(covers(line, b.center) for row in bridged_rows for b in row):
+                    wide = with_number(line, det.numbers, after=True)
+                    for box, margins in itertools.product([wide] * (wide is not None) + [line], FINGERPRINT_CROPS):
+                        crop = rectified_crop(image, det.to_photo(box.quad(margins)), fill)
+                        if margin_of(crop) is not None:
+                            passing.append((line, crop))
+                            break
+            if len(passing) == 1:
+                accepted, optional = passing, True
         if len(accepted) == 1:
             spare_line, spare = accepted[0]
+    else:
+        optional = False
     extra = [(b.score, (b.a1 - b.a0) / b.h, det.card_of(b.center) != g) for b in det.words
              if not any(covers(line, b.center) for line in lines + ([spare_line] if spare_line else []) + removed_lines)]
     numbers = number_groups.get(g, [])
@@ -1683,6 +2003,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     layout.fingerprint = spare
     layout.fingerprint_others = others
     layout.fingerprint_hypothesis = hypothesis
+    layout.fingerprint_optional = optional
     layout.extra_lines = not extra and g < 0 and anchored is None and spare is None and fingerprint is not None \
         and len(linked) >= MIN_ANCHOR_NUMBERS and len(linked) < count and bool(extra_line_sets(groups[g]))
     layout.extra_lines_removed = len(removed_lines)

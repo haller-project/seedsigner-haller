@@ -136,6 +136,7 @@ LOOSE_FINGERPRINT_MARGIN = 0.0
 # passes the thresholds; without it (before task-4497), the list is not found. The line taken out is the only one
 # left out of a list of one line too many, so that no other layout of the same words has a valid count (a grid of
 # 24 words in 3 numbered columns, its fingerprint above it and misread, was not found; 22/11/2026).
+# Frozen benches against 978f1fa: 46 exact seeds gained (1 real), none lost, no verified reading changed.
 HYPOTHESIS_KEPT = True
 # Rows at the start or the end of a list that may not be words (detector.extra_line_sets), read when the list is not
 # found or is numbered on most of its lines but not all (read_seed): a row is a label if its best label

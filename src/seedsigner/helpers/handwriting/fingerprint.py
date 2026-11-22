@@ -35,6 +35,11 @@ HEX_CLASSES = np.array([1 + ALPHABET.index(c) for c in HEX])
 # Words written before the digits ("FP: 22a2b678"); the colon and spaces are
 # not in the alphabet of the network and read as blanks
 PREFIXES = ("", "fp", "xfp", "mfp", "fingerprint")
+# Labels written on a line of their own near the words or the fingerprint
+# ("Fingerprint", "XFP", "Seed words", "12 words"...), spaces and colons left
+# out; none is a BIP39 word (see label_margins)
+LABELS = ("fingerprint", "masterfingerprint", "masterfp", "fp", "xfp", "mfp", "seedwords", "words", "12words",
+          "24words", "seedphrase", "mnemonic", "recoveryphrase")
 
 # Probability of a fingerprint given the line, among all strings of 8
 # hexadecimal digits, above which it matches. Chance match of a wrong seed:
@@ -325,6 +330,47 @@ def margins(log_probs: np.ndarray, word_scores: np.ndarray) -> tuple[float, floa
     hexadecimal = float(forward(log_probs, every)[0])
     free = float(log_probs.max(0).sum())
     return hexadecimal - float(np.max(word_scores)), hexadecimal - free
+
+
+
+def text_log_likelihood(log_probs: np.ndarray, text: str) -> float:
+    """
+        log P(text | frames) by the CTC forward algorithm (blank = class 0),
+        `text` made of characters of ALPHABET; log_probs: (NUM_CLASSES,
+        frames) network outputs.
+    """
+    log_probs = log_probs.T
+    labels = [1 + ALPHABET.index(c) for c in text]
+    ext = np.zeros(2 * len(labels) + 1, int)
+    ext[1::2] = labels
+    n = len(ext)
+    skip = np.zeros(n, bool)
+    skip[3::2] = [labels[i] != labels[i - 1] for i in range(1, len(labels))]
+    a = np.full(n, -np.inf)
+    a[0], a[1] = log_probs[0, 0], log_probs[0, ext[1]]
+    for t in range(1, log_probs.shape[0]):
+        previous = a
+        a = previous.copy()
+        a[1:] = np.logaddexp(a[1:], previous[:-1])
+        a[2:] = np.where(skip[2:], np.logaddexp(a[2:], previous[:-2]), a[2:])
+        a = a + log_probs[t][ext]
+    return float(np.logaddexp(a[-1], a[-2]))
+
+
+
+def label_margins(log_probs: np.ndarray, word_scores: np.ndarray) -> tuple[float, float, float]:
+    """
+        (label margin, label fit, word fit) of a line:
+        * label margin: log-likelihood of its best label (LABELS) minus that of
+          its best BIP39 word;
+        * label fit: that of its best label minus that of the free reading
+          of the network (as in margins);
+        * word fit: that of its best BIP39 word minus that of the free reading.
+    """
+    label = max(text_log_likelihood(log_probs, text) for text in LABELS)
+    free = float(log_probs.max(0).sum())
+    word = float(np.max(word_scores))
+    return label - word, label - free, word - free
 
 
 

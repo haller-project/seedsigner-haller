@@ -871,6 +871,49 @@ def extra_rows(boxes: list[Box]) -> list[tuple[Box, list[Box], list[list[Box]]]]
 
 
 
+def extra_line_sets(boxes: list[Box]) -> list[tuple[list[tuple[Box, list[Box]]], list[list[Box]]]]:
+    """
+        Sets of one or two rows at the start or the end of `boxes` (the first,
+        the last, the first two, the last two, the first and the last; rows as
+        in extra_rows, of at most MAX_EXTRA_ROW_PIECES pieces) whose removal
+        leaves columns of a valid number of words (word_columns): lines
+        written with the words that may not be words (a fingerprint, a label
+        such as "Fingerprint" or "Seed words", a second fingerprint). For
+        each: ([(the row as one line, its boxes along the text)], those
+        columns).
+    """
+    if len(boxes) < MIN_GROUP_WORDS + 2:
+        return []
+    h = float(np.median([b.h for b in boxes]))
+    rows = []
+    for b in sorted(boxes, key=lambda b: b.c):
+        if rows and abs(b.c - np.mean([x.c for x in rows[-1]])) < SAME_LINE * max(h, b.h):
+            rows[-1].append(b)
+        else:
+            rows.append([b])
+    n = len(rows)
+    found = []
+    for removed in ([0], [n - 1], [0, 1], [n - 2, n - 1], [0, n - 1]):
+        if n - len(set(removed)) < 2 or len(set(removed)) < len(removed):
+            continue
+        out = []
+        for i in removed:
+            row = sorted(rows[i], key=lambda b: b.a0)
+            if 1 + sum(b.a0 - a.a1 > GRID_WORD_GAP * h for a, b in zip(row, row[1:])) > MAX_EXTRA_ROW_PIECES:
+                break
+            line = copy_box(row[0])
+            for b in row[1:]:
+                line.merge(copy_box(b))
+            out.append((line, row))
+        else:
+            gone = [b for i in removed for b in rows[i]]
+            columns = word_columns([b for b in boxes if not any(b is x for x in gone)])
+            if columns is not None:
+                found.append((out, columns))
+    return found
+
+
+
 def column_at_edge(lines: list[Box], size: tuple[int, int]) -> bool:
     """
         The first or last line of a column is closer than EDGE_LINES line
@@ -1308,7 +1351,8 @@ def detections(image: Image.Image, step) -> Detection:
 
 
 
-def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed: bool = False) -> WordLayout:
+def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed: bool = False,
+               extra: bool = False) -> WordLayout:
     """
         Words of the card or list on `image` (upright grayscale photo, full
         resolution) found by the detector (see the steps above).
@@ -1319,6 +1363,13 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         `layout.doubtful`: words never certain (slots where the word map shows
         ink but no word box was found). Raises WordsNotFound if no document
         with a valid number of words is found.
+        With `extra`, the list is read without one or two rows at its start or
+        end that read as a fingerprint, a label or no word (see
+        extra_line_sets and the second part below); WordsNotFound if no such
+        set of rows is found. `layout.extra_lines` (without `extra`): a list
+        numbered on most of its lines, with a valid count, some of whose lines
+        have no number while such a set of rows exists: worth reading with
+        `extra` (handwriting.read_seed).
     """
     det = detections(image, step)
     size = det.maps.shape[2], det.maps.shape[1]
@@ -1442,7 +1493,46 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     fill = int(np.median(np.asarray(image.reduce(16))))
     spare = spare_first = None
     hypothesis = False
-    if g < 0 and anchored is None and count not in page.SEED_LENGTHS and fingerprint is not None:
+    others, removed_lines, strong = [], [], False
+    if extra:
+        # rows at the start or the end of a list that may not be words: each is a fingerprint (strict thresholds,
+        # or the loose margin of the fingerprint network), a label, or (with a fingerprint only) a line read as no
+        # word; exactly one set of rows must pass. A set with a loose fingerprint or a line read as no word is a
+        # hypothesis, kept by read_seed only if a fingerprint matches a seed read.
+        roles_of = getattr(fingerprint, "role", None)
+        if g >= 0 or anchored is not None or roles_of is None:
+            raise WordsNotFound("no extra lines")
+        numbers_g = number_groups.get(g, [])
+        cache, passed = {}, []
+        for rows, rest in extra_line_sets(groups[g]):
+            roles = []
+            for line, pieces in rows:
+                key = tuple(id(b) for b in pieces)
+                if key not in cache:
+                    # the row (widened to the numbers at its ends) on both fingerprint crops, then its last piece
+                    # (a fingerprint after a label on the same row): three crops at most, read on a Pi Zero
+                    wide = with_number(line, numbers_g, after=True) or line
+                    boxes = [(wide, m) for m in FINGERPRINT_CROPS] + [(pieces[-1], FINGERPRINT_CROPS[0])] * (len(pieces) > 1)
+                    crops = [rectified_crop(image, det.to_photo(box.quad(margins)), fill) for box, margins in boxes]
+                    cache[key] = roles_of(crops)
+                roles.append(cache[key])
+            kinds = [r[0] for r in roles]
+            fingerprints = [r[1] for r in roles if r[0] in ("fingerprint", "loose")]
+            if None in kinds or not (fingerprints or all(k == "label" for k in kinds)):
+                continue
+            passed.append((sum(k == "fingerprint" for k in kinds), -sum(k == "other" for k in kinds), rows, rest,
+                           fingerprints, any(k in ("loose", "other") for k in kinds),
+                           all(k in ("fingerprint", "label") for k in kinds)))
+        passed.sort(key=lambda p: p[:2], reverse=True)
+        if not passed or (len(passed) > 1 and passed[0][:2] == passed[1][:2]):
+            raise WordsNotFound("no extra lines")
+        _, _, rows, columns, fingerprints, hypothesis, strong = passed[0]
+        count = sum(len(c) for c in columns)
+        removed_lines = [line for line, _ in rows]
+        if fingerprints:
+            spare, others = fingerprints[0], fingerprints[1:]
+            spare_first = removed_lines[0]
+    elif g < 0 and anchored is None and count not in page.SEED_LENGTHS and fingerprint is not None:
         # lines that may be a fingerprint written with the words: (line, its pieces, columns of the words without it)
         tried = []
         if count - 1 in page.SEED_LENGTHS:
@@ -1491,7 +1581,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         raise WordsNotFound(f"{count} lines found", at_edge=at_edge, line_count=count, card=g >= 0 and at_edge)
     lines = [b for c in columns for b in c]
     spare_line = spare_first
-    if spare is None and fingerprint is not None:
+    if spare is None and fingerprint is not None and not extra:
         # a line of the document outside the words (above, below or beside them, numbered or not, with a list
         # counted by its numbers too) is tried as the fingerprint before it is taken for a word left out
         left = [copy_box(b) for b in det.words if b.score > 0 and det.card_of(b.center) in (g, -1)
@@ -1518,7 +1608,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         if len(accepted) == 1:
             spare_line, spare = accepted[0]
     extra = [(b.score, (b.a1 - b.a0) / b.h, det.card_of(b.center) != g) for b in det.words
-             if not any(covers(line, b.center) for line in lines + ([spare_line] if spare_line else []))]
+             if not any(covers(line, b.center) for line in lines + ([spare_line] if spare_line else []) + removed_lines)]
     numbers = number_groups.get(g, [])
     linked = anchored["numbers"] if anchored else link_numbers(det, lines, numbers)
     quads = [[det.to_photo(b.quad(m)) for b in lines] for m in CROP_VARIANTS]
@@ -1591,8 +1681,15 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
                         complete=not (at_edge or ambiguous))
     layout.doubtful = anchored["synthetic"] if anchored else set()
     layout.fingerprint = spare
+    layout.fingerprint_others = others
     layout.fingerprint_hypothesis = hypothesis
-    layout.not_found = WordsNotFound(f"{count + 1} lines found", at_edge=at_edge, line_count=count + 1) if hypothesis else None
+    layout.extra_lines = not extra and g < 0 and anchored is None and spare is None and fingerprint is not None \
+        and len(linked) >= MIN_ANCHOR_NUMBERS and len(linked) < count and bool(extra_line_sets(groups[g]))
+    layout.extra_lines_removed = len(removed_lines)
+    layout.extra_lines_strong = strong
+    found_lines = count + max(1, len(removed_lines))
+    layout.not_found = WordsNotFound(f"{found_lines} lines found", at_edge=at_edge, line_count=found_lines) \
+        if hypothesis else None
     layout.lengths = [getattr(b, "ink", b.a1 - b.a0) / b.h for b in lines]
     layout.extra_words = extra
     layout.orders_found = orders_found

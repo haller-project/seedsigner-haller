@@ -170,6 +170,8 @@ INK_DARK = 0.95               # a column of the strip (two heights high) dark on
 INK_THICK = 0.15              # a stroke covers at least this many heights of the central band, across the text
 INK_EDGE = 0.5                # columns closer than this many heights to a dark column are no strokes
 INK_MIN_GROWTH = 0.5           # a side of a line is extended only if it grows by this many heights or more (a letter)
+BRIDGE_ROLES = False          # (variant) a row across the columns is left out only if it also reads as no BIP39 word, a
+                              # label or a fingerprint (handwriting.line_role)
 INK_MIN_WORD = 1.0            # ink at least this long (heights) in an empty numbered slot may be a word (anchored_slots)
 
 # A first or last row of a list holding at most this many pieces is tried as the fingerprint when the other words
@@ -587,12 +589,13 @@ class InkStats:
 class InkReach:
     """
         Strokes along the lines of the photo: extent of a line by the ink of its
-        row (reach), ink of an empty numbered slot (slot). The strip of a line
+        row (reach), ink of an empty numbered slot (slot; `slots`: used by
+        anchored_slots). The strip of a line
         is cut from the photo reduced so that a line is about INK_STRIP pixels
         high (cheap on a Pi Zero); ruled and printed lines are removed.
     """
-    def __init__(self, image: Image.Image, det: Detection, fill: int):
-        self.image, self.det, self.fill = image, det, fill
+    def __init__(self, image: Image.Image, det: Detection, fill: int, slots: bool = True):
+        self.image, self.det, self.fill, self.slots = image, det, fill, slots
         self.reduced = {}
 
 
@@ -671,7 +674,7 @@ class InkReach:
             if inked[j]:
                 first = j
             j -= 1
-        a0, a1 = lo + first / per - 0.25 * h, lo + (last + 1) / per + 0.25 * h
+        a0, a1 = max(lo, lo + first / per - 0.25 * h), min(hi, lo + (last + 1) / per + 0.25 * h)
         # a side grows only by a letter or more (the box already holds the margins of the word map)
         return (a0 if a0 <= box.a0 - INK_MIN_GROWTH * h else box.a0), (a1 if a1 >= box.a1 + INK_MIN_GROWTH * h else box.a1)
 
@@ -986,15 +989,19 @@ def row_words(boxes: list[Box], chained: bool = False) -> list[list[Box]] | None
     return words
 
 
-def bridged_columns(boxes: list[Box]) -> list[list[Box]] | None:
+def bridged_columns(boxes: list[Box], numbers: list[Box] = ()) -> tuple[list[list[Box]], list[list[Box]]] | None:
     """
         Columns of a list whose corridor between two columns is covered only
         by one or two rows at its start or end (a title or a fingerprint
         written across the columns: group_lines then finds a single column):
         the columns of the other boxes (group_lines, or grid_columns) if there
         are at least two of them, of a valid number of words, and every row
-        left out covers a corridor between them. The fewest rows left out first (the first, the
-        last, then two); None if no such set of rows is found.
+        left out overlaps a corridor between them, the rows left out together
+        closing every corridor (no gap of COLUMN_GAP heights left in it). A row
+        with a number of `numbers` just before one of its pieces is a row of
+        the list, never left out. The fewest rows left out first (the first, the
+        last, then two): (those columns, the rows left out); None if no such
+        set of rows is found.
     """
     if len(boxes) < MIN_GROUP_WORDS + 1:
         return None
@@ -1017,8 +1024,26 @@ def bridged_columns(boxes: list[Box]) -> list[list[Box]] | None:
             if columns is None or sum(len(c) for c in columns) not in page.SEED_LENGTHS:
                 continue
         corridors = [(max(b.a1 for b in columns[i]), min(b.a0 for b in columns[i + 1])) for i in range(len(columns) - 1)]
-        if all(any(b.a0 < c1 and b.a1 > c0 for b in rows[i] for c0, c1 in corridors) for i in removed):
-            return columns
+        if any(c1 <= c0 for c0, c1 in corridors):
+            continue
+
+        def closes(spans, c0, c1):
+            # the spans leave no gap of COLUMN_GAP heights or more inside the corridor (c0, c1): group_lines merges
+            # the columns
+            edge, widest = c0, 0.0
+            for a0, a1 in sorted(spans):
+                if a1 <= c0 or a0 >= c1:
+                    continue
+                widest, edge = max(widest, a0 - edge), max(edge, a1)
+            return max(widest, c1 - edge) < COLUMN_GAP * h
+
+        out = [b for i in removed for b in rows[i]]
+        if any(n.middle < b.a0 and n.a1 >= b.a0 - h and abs(n.c - b.c) < SAME_LINE * max(n.h, b.h)
+               for b in out for n in numbers):
+            continue
+        if all(any(b.a0 < c1 and b.a1 > c0 for b in rows[i] for c0, c1 in corridors) for i in removed) \
+                and all(closes([(b.a0, b.a1) for b in out], c0, c1) for c0, c1 in corridors):
+            return columns, [rows[i] for i in removed]
     return None
 
 
@@ -1354,7 +1379,7 @@ def anchored_slots(det: Detection, words: list[Box], numbers: list[Box]) -> dict
     flat = [s for column in grid for s in column]
     count = sum(s[1] for s in flat)
     reach = getattr(det, "ink_reach", None)
-    if count not in page.SEED_LENGTHS and reach is not None:
+    if count not in page.SEED_LENGTHS and reach is not None and reach.slots:
         # words too faint for the word map: an empty slot holding strokes (InkReach.slot) on the line of the words is
         # taken as written, its extent that of the strokes, if the count then becomes valid
         heights = [s[0].h for s in flat if not s[3]]
@@ -1610,7 +1635,8 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         det.words = [b for b in det.words if not any(b is c for c in scribbled)]
         det.numbers = [n for n in det.numbers if not any(with_number(c, [n]) for c in scribbled)]
     fill = int(np.median(np.asarray(image.reduce(16))))
-    det.ink_reach = InkReach(image, det, fill)
+    # the second search leaves out words scribbled over: their slots are never filled again by their ink
+    det.ink_reach = InkReach(image, det, fill, slots=not crossed)
     groups, number_groups = {}, {}
     for b in det.words:
         if b.score > 0:
@@ -1705,9 +1731,20 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         # a title or a fingerprint written across the columns: the list read without it (its boxes are then outside
         # the words, tried as the fingerprint below), if the count is wrong or if it splits the list into more columns
         # (a count made valid by a column merged into one: the title counted, two words joined into one line)
-        bridged = bridged_columns(groups[g])
-        if bridged is not None and (count not in page.SEED_LENGTHS or len(bridged) > len(columns)):
-            columns, count = bridged, sum(len(c) for c in bridged)
+        bridged = bridged_columns(groups[g], number_groups.get(g, []))
+        if bridged is not None and BRIDGE_ROLES and getattr(fingerprint, "role", None) is not None:
+            # lexical signal too (variant): every row left out reads as no word, a label or a fingerprint
+            fill_ = int(np.median(np.asarray(image.reduce(16))))
+            for row in bridged[1]:
+                line = copy_box(row[0])
+                for b in row[1:]:
+                    line.merge(copy_box(b))
+                crops = [rectified_crop(image, det.to_photo(line.quad(m)), fill_) for m in FINGERPRINT_CROPS]
+                if fingerprint.role(crops)[0] is None:
+                    bridged = None
+                    break
+        if bridged is not None and (count not in page.SEED_LENGTHS or len(bridged[0]) > len(columns)):
+            columns, count = bridged[0], sum(len(c) for c in bridged[0])
     in_rows = False
     if g < 0 and anchored is None and count not in page.SEED_LENGTHS:
         for chained in (False, True):

@@ -353,12 +353,13 @@ Word crops read during one reading of a photo are kept by content
 outputs of the networks, which depend on the crop alone. No reading
 changes; the second searches cost less on a Pi Zero.
 
-Two variants stay in the code, off: `CARD_SHAPE` (a card kernel holds a
+A variant stays in the code, off: `CARD_SHAPE` (a card kernel holds a
 document only if it has the size and the compactness of a card) frees the
-words of SeedSigner cards cut by the frame on the benches;
-`EXTRA_LINES_ANY` (the search for label and fingerprint rows also when
-words are left out of the lines) gains nothing on the benches and costs up
-to 88 s more on a Pi Zero.
+words of SeedSigner cards cut by the frame on the benches. The second
+reading without label or fingerprint rows (`layout.extra_lines`) is
+offered only when every word box is on a line of the list; offering it
+also when words are left out gained nothing on the benches and cost up to
+88 s more on a Pi Zero.
 
 Measured on the 19 frozen benches of the decision tools (22/11/2026): no
 false verified seed, no loss; 1 more exact and verified seed on the photos
@@ -366,6 +367,34 @@ of the site (a list of 24 words in three numbered columns whose first five
 words were taken for a card: read 21 lines, now 24 words with the
 fingerprint verified), 1 to 2 more on the fingerprint and trap benches;
 worst estimated time on a Pi Zero 42.8 → 37.7 s on the real photos.
+
+### Fingerprint at the end of a word's row, optional fingerprint
+
+- **At the end of a row** (`FINGERPRINT_TAIL`): a fingerprint written on
+  the row of the first or last word of a column, after it (« 12. GUARD
+  2cd9b02c »), is merged into the line of that word by `group_lines`. On
+  the first and last line of each column, the last piece, more than
+  `TAIL_GAP` (1.5) heights after the piece before it and at least
+  `FINGERPRINT_MIN_LENGTH` heights long, is tried as the fingerprint at the
+  strict thresholds; taken, it is cut off the line, the word keeping its
+  part.
+- **Optional fingerprint** (`FINGERPRINT_OPTIONAL_ANY`): with a valid count
+  and no line at the strict thresholds, one crop of one line (that last
+  piece if there is one, else the longest line outside the words) is tried
+  at the loose margin; passing it, it is checked against the seeds read,
+  and the list is kept as read if it matches none
+  (`layout.fingerprint_optional`). One check per search, as on the other
+  paths: the bound on a false verified seed per photo does not change. The
+  line stays a word left out of the list until it matches. The outputs of
+  the fingerprint network are kept per crop during a reading, and this
+  line is checked on its crop only: the loose margin and the check cost
+  one pass of the network.
+
+Measured on the 19 frozen benches (22/11/2026): no false verified seed, no
+loss; 71 more verified seeds on the fingerprint, trap and label benches, 2
+more on the photos of the site (a pencil fingerprint under the list, a
+fingerprint after the last word); worst estimated time on a Pi Zero 37.7 →
+37.8 s on the real photos.
 
 ### Check of the fingerprint
 

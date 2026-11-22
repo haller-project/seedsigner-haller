@@ -389,6 +389,10 @@ class SeedReading:
         if self.numbers_incoherent:
             # numbers read that contradict the order of the words (detector.NUMBER_CHECK)
             return Trust(TRUST_LOW)
+        if self.ambiguous_order and len(confirmed or {}) < len(self.words):
+            # several orders of the lines give a plausible seed and neither the numbers nor the fingerprint chose one:
+            # the probability of the seed measures its words only, not its order
+            return Trust(TRUST_LOW)
         if analysis.status == "valid":
             return Trust(TRUST_HIGH)
         if analysis.status == "uncertain" and analysis.confidence >= MIN_MEDIUM_SEED_PROBABILITY:

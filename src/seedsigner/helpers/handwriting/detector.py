@@ -2082,4 +2082,6 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     layout.numbers_incoherent = incoherent
     layout.numbers_checked = checked
     layout.merged = merged
+    # words held by a card kernel (in this document or another one): reading them as one list may change something
+    layout.cards_held = any(k >= 0 for k in groups)
     return layout

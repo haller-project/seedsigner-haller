@@ -66,3 +66,41 @@ def test_the_best_order_is_taken():
 
 def test_no_number_read_no_contradiction():
     assert not detector.numbers_contradict([[0, 1, 2]], {})
+
+
+def test_a_crop_read_again_reuses_the_networks(monkeypatch):
+    """ Two readers of the same crops (two searches of one photo) run the networks once per crop. """
+    import seedsigner.helpers.handwriting as hw
+    Image = pytest.importorskip("PIL.Image")
+    ImageDraw = pytest.importorskip("PIL.ImageDraw")
+    crops = []
+    for i in range(3):
+        im = Image.new("L", (120, 40), 235)
+        ImageDraw.Draw(im).rectangle((10 + 20 * i, 10, 40 + 20 * i, 30), fill=30)
+        crops.append(im)
+    calls = []
+
+    class Net:
+        def log_probs(self, ink):
+            calls.append(1)
+            return np.zeros((8, 4))
+
+    class Dec:
+        words = ["abandon", "ability", "able", "about"]
+
+        def scores(self, log_probs):
+            return np.arange(4, dtype=float)
+
+    monkeypatch.setattr(hw, "load_engine", lambda: (Net(), Dec(), Net()))
+    monkeypatch.setattr(hw, "normalize_word", lambda crop: np.asarray(crop, np.float32))
+
+    class Layout:
+        def crop(self, k, variant):
+            return crops[k]
+
+    hw._crop_cache.clear(); hw._score_cache.clear()
+    for _ in range(2):
+        reader = hw.LayoutReader(Layout())
+        for k in range(3):
+            reader.read(k, 0, hw.FIRST)
+    assert len(calls) == 3

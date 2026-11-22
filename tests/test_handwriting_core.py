@@ -150,6 +150,8 @@ def test_second_readings_only_when_the_seed_is_not_valid(monkeypatch):
     """ A valid seed is read by the first network only; an invalid one also by the second network and the blend. """
     import seedsigner.helpers.handwriting as hw
     valid = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".split()
+    # the fake crops are all alike: without the cache, each one goes through the networks
+    monkeypatch.setattr(hw, "WORD_CACHE", False)
     for words, second in ((valid, 0), (valid[:-1] + ["zoo"], len(valid))):
         calls = counting_networks(monkeypatch)
         monkeypatch.setattr(hw.detector, "find_words", fake_find(words))

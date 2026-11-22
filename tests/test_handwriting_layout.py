@@ -38,12 +38,13 @@ def test_band_order_gaps_at_different_rows():
     assert detector.band_order([left, right]) is None
 
 
-def test_band_order_offered_only_with_numbers():
+def test_band_order_offered_without_numbers():
+    """ two bands split by a wide gap: the band order is offered whether line numbers are read or not """
     centers = [0, 20, 40, 75, 95, 115]
-    columns = [column(0, centers), column(200, centers)]
-    assert len(detector.candidate_orders(columns)) == 2
-    orders = detector.candidate_orders(columns, bands=True)
-    assert orders[2] == [0, 1, 2, 6, 7, 8, 3, 4, 5, 9, 10, 11]
+    orders = detector.candidate_orders([column(0, centers), column(200, centers)])
+    assert len(orders) == 3 and orders[2] == [0, 1, 2, 6, 7, 8, 3, 4, 5, 9, 10, 11]
+    regular = [0, 20, 40, 60, 80, 100]
+    assert len(detector.candidate_orders([column(0, regular), column(200, regular)])) == 2
 
 
 def test_row_words_reads_rows_left_to_right():

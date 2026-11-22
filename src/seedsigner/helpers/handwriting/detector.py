@@ -1537,12 +1537,14 @@ def band_order(columns: list[list[Box]]) -> list[int] | None:
 
 
 
-def candidate_orders(columns: list[list[Box]], bands: bool = False) -> list[list[int]]:
+def candidate_orders(columns: list[list[Box]]) -> list[list[int]]:
     """
-        Column by column, then row by row when there are several columns (word
-        indices numbered column by column), then, with `bands` (numbered
-        lines, which tell the order), column by column within bands
-        (band_order) when the page is split into bands.
+        Every order the layout makes plausible: column by column, then row by
+        row when there are several columns (word indices numbered column by
+        column), then column by column within bands (band_order) when the page
+        is split into bands. The line numbers, when read, choose among them;
+        otherwise two orders giving a plausible seed leave the order ambiguous
+        (read_layout).
     """
     count = sum(len(c) for c in columns)
     orders = [list(range(count))]
@@ -1552,7 +1554,7 @@ def candidate_orders(columns: list[list[Box]], bands: bool = False) -> list[list
         by_rows = [int(starts[k] + r) for r in range(rows) for k in range(len(columns)) if r < len(columns[k])]
         if by_rows != orders[0]:
             orders.append(by_rows)
-        banded = band_order(columns) if bands else None
+        banded = band_order(columns)
         if banded is not None and banded not in orders:
             orders.append(banded)
     return orders
@@ -2023,7 +2025,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
             else:
                 first_number_needed = True
     orders = anchored["orders"] if anchored else \
-        [list(range(count))] if in_rows else candidate_orders(columns, bands=len(linked) >= MIN_NUMBERS_READ)
+        [list(range(count))] if in_rows else candidate_orders(columns)
 
     read_numbers = {}
 

@@ -281,6 +281,7 @@ class SeedReading:
         self.fingerprint = None
         self.verified = False
         self.extra_lines = False
+        self.numbers_incoherent = False
         self._last = None
 
 
@@ -349,6 +350,9 @@ class SeedReading:
             return Trust(TRUST_LOW)
         if self.extra_lines:
             # rows of the list read as a fingerprint or a label rather than as words, not verified without them
+            return Trust(TRUST_LOW)
+        if self.numbers_incoherent:
+            # numbers read that contradict the order of the words (detector.NUMBER_CHECK)
             return Trust(TRUST_LOW)
         if analysis.status == "valid":
             return Trust(TRUST_HIGH)
@@ -861,6 +865,23 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             return detector.find_words(image, step, fingerprint=fingerprint, crossed=crossed)
 
         reading, _, not_found = search(find, gray, progress, on_word, pool, spare_line)
+        if not crossed and reading is not None and getattr(reading.layout, "numbers_incoherent", False):
+            # numbers read that contradict the order of the words: read again as one list with the words of every
+            # document (a part of the sheet taken for a card); kept if its numbers are read and agree with its order,
+            # otherwise the first reading is kept with every word uncertain
+            merged_pool = []
+
+            def find_merged(image, step, fingerprint):
+                return detector.find_words(image, step, fingerprint=fingerprint, merged=True)
+
+            other, _, _ = search(find_merged, gray, progress, on_word, merged_pool, spare_line)
+            if other is not None and not other.layout.numbers_incoherent \
+                    and other.layout.numbers_checked >= detector.MIN_NUMBERS_READ:
+                reading = other
+                pool[:] = merged_pool
+            else:
+                reading.numbers_incoherent = True
+                reading.mark_disputed()
         if not crossed and (reading is not None and getattr(reading.layout, "extra_lines", False)
                             and reading.fingerprint_crop is None and not getattr(reading, "verified", False)):
             # a list numbered on most of its lines, with lines without a number: read again without one or two rows

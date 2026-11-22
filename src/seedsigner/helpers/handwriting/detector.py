@@ -66,6 +66,16 @@ MIN_CARD_KERNEL = 150         # output pixels of a card kernel component (smalle
 MIN_GROUP_WORDS = 3           # a document with fewer words is a blank card or noise
 ALL = -2                      # document made of every word found, cards and free words together
 MIN_OTHER_WORDS = 6           # words of another document making every word uncertain
+CARD_SHAPE = True             # a card kernel holds a document only if it has the shape of a card (Detection.shaped)
+CARD_MIN_PIXELS = 3000        # output pixels of a card kernel with the shape of a card (cards read on the photos of the
+                              # site: 4 700 to 23 000; parts of a sheet taken for a card: 150 to 2 500)
+CARD_MIN_COMPACTNESS = 0.55   # share of its oriented bounding rectangle covered by such a kernel (cards: 0.61 to 0.96;
+                              # parts of a sheet: 0.31 to 0.56)
+NUMBER_CHECK = True           # numbers read that contradict the order of the words make the list incoherent
+                              # (find_words: layout.numbers_incoherent)
+NUMBER_SURE = 0.9             # probability of the value of a number read taken into account by that check
+EXTRA_LINES_ANY = True        # rows of a list tried as a label or a fingerprint (layout.extra_lines) also when words are
+                              # left out of the lines (before: only when every word box was on a line)
 BEYOND_TEXT = 0.3             # writing of a card farther than this many word heights beyond its text: card cut there
 ZOOM_SHARE = 0.5              # documents covering less of the photo are detected again on their region (0.4 before
                               # the detector of 21/11/2026)
@@ -273,6 +283,21 @@ def principal_angle(pixels: np.ndarray) -> tuple[float, float]:
 
 
 
+def card_shaped(pixels: np.ndarray) -> bool:
+    """
+        True if a card kernel component has the shape of a card: at least
+        CARD_MIN_PIXELS output pixels covering at least CARD_MIN_COMPACTNESS
+        of its bounding rectangle along its main axis.
+    """
+    if len(pixels) < CARD_MIN_PIXELS:
+        return False
+    a, _ = principal_angle(pixels)
+    y, x = pixels[:, 0].astype(float), pixels[:, 1].astype(float)
+    u, v = x * math.cos(a) + y * math.sin(a), -x * math.sin(a) + y * math.cos(a)
+    return len(pixels) >= CARD_MIN_COMPACTNESS * (np.ptp(u) + 1) * (np.ptp(v) + 1)
+
+
+
 def text_angle(kernels: list[np.ndarray]) -> float:
     """
         Direction of the text: mean axis of the elongated word kernels,
@@ -369,6 +394,7 @@ class Detection:
         self.words = [Box(p, words, maps[HEIGHT], angle) for p in word_kernels]
         self.numbers = [Box(p, numbers, maps[HEIGHT], angle) for p in number_kernels]
         self.cards = [p for p in components(maps[CARD_KERNEL] > 0) if len(p) >= MIN_CARD_KERNEL]
+        self.shaped = [card_shaped(p) for p in self.cards]
         self.labels = np.zeros(maps.shape[1:], np.int32)
         for i, pixels in enumerate(self.cards, 1):
             self.labels[pixels[:, 0], pixels[:, 1]] = i
@@ -1543,6 +1569,19 @@ def candidate_orders(columns: list[list[Box]], bands: bool = False) -> list[list
 
 
 
+def numbers_contradict(orders: list[list[int]], values: dict[int, int]) -> bool:
+    """
+        True if the numbers read {line: value} contradict every order of the
+        lines: in the order that fits them best, at least two of them, and at
+        least half, differ from the position of their line (1 for the first).
+    """
+    if not values:
+        return False
+    wrong = min(sum(order.index(k) + 1 != v for k, v in values.items()) for order in orders)
+    return wrong >= max(2, len(values) / 2)
+
+
+
 def order_by_numbers(orders: list[list[int]], probabilities: dict) -> list[list[int]] | None:
     """
         The order supported by the numbers read (at least MIN_NUMBERS_READ) by
@@ -1617,7 +1656,7 @@ def detections(image: Image.Image, step) -> Detection:
 
 
 def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed: bool = False,
-               extra: bool = False) -> WordLayout:
+               extra: bool = False, merged: bool = False) -> WordLayout:
     """
         Words of the card or list on `image` (upright grayscale photo, full
         resolution) found by the detector (see the steps above).
@@ -1635,6 +1674,11 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         numbered on most of its lines, with a valid count, some of whose lines
         have no number while such a set of rows exists: worth reading with
         `extra` (handwriting.read_seed).
+        `layout.numbers_incoherent`: numbers read and linked to their line that
+        contradict every order of the words left (see NUMBER_CHECK). With
+        `merged`, the card kernels are ignored: every word is on one list (a
+        list whose numbers contradict its order, read again with the words of
+        another document).
     """
     det = detections(image, step)
     size = det.maps.shape[2], det.maps.shape[1]
@@ -1657,9 +1701,11 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     for b in det.words:
         if b.score > 0:
             groups.setdefault(det.card_of(b.center), []).append(b)
-    stray = [g for g, boxes in groups.items() if g >= 0 and len(boxes) < MIN_GROUP_WORDS]
+    stray = [g for g, boxes in groups.items() if g >= 0 and (len(boxes) < MIN_GROUP_WORDS or merged
+                                                              or (CARD_SHAPE and not det.shaped[g]))]
     for g in stray:
-        # a card kernel holding fewer words is no document: its words and numbers are free
+        # a card kernel holding fewer words, or without the shape of a card (a part of a sheet), is no document: its
+        # words and numbers are free
         groups.setdefault(-1, []).extend(groups.pop(g))
     for n in det.numbers:
         g = det.card_of(n.center)
@@ -1927,7 +1973,7 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
             spare_line, spare = accepted[0]
     else:
         optional = False
-    extra = [(b.score, (b.a1 - b.a0) / b.h, det.card_of(b.center) != g) for b in det.words
+    words_left = [(b.score, (b.a1 - b.a0) / b.h, det.card_of(b.center) != g) for b in det.words
              if not any(covers(line, b.center) for line in lines + ([spare_line] if spare_line else []) + removed_lines)]
     numbers = number_groups.get(g, [])
     linked = anchored["numbers"] if anchored else link_numbers(det, lines, numbers)
@@ -1988,6 +2034,21 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
                 orders = decided
                 break
 
+    incoherent, checked = False, 0
+    if NUMBER_CHECK and read_numbers:
+        # numbers read, sure of their value and linked to their line by the link map, that contradict every order left
+        # (a list missing its first words, a fingerprint whose digits were taken for numbers): the list is incoherent
+        sure = {}
+        for k, p in read_numbers.items():
+            if p is None:
+                continue
+            v = int(np.argmax(p))
+            b, n = lines[k], linked[k]
+            if p[v] >= NUMBER_SURE and det.link_score(n.center, b.start if n.middle < b.a0 else b.center) >= LINK_THRESHOLD:
+                sure[k] = v + 1
+        checked = len(sure)
+        incoherent = numbers_contradict(orders, sure)
+
     if last_number_needed and not at_edge:
         last = orders[0][-1] if len(orders) == 1 else None
         p = number(last) if last in linked else None
@@ -2004,7 +2065,8 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     layout.fingerprint_others = others
     layout.fingerprint_hypothesis = hypothesis
     layout.fingerprint_optional = optional
-    layout.extra_lines = not extra and g < 0 and anchored is None and spare is None and fingerprint is not None \
+    # (EXTRA_LINES_ANY False: as before, only when every word box is on a line)
+    layout.extra_lines = (not extra if EXTRA_LINES_ANY else not words_left) and g < 0 and anchored is None and spare is None and fingerprint is not None \
         and len(linked) >= MIN_ANCHOR_NUMBERS and len(linked) < count and bool(extra_line_sets(groups[g]))
     layout.extra_lines_removed = len(removed_lines)
     layout.extra_lines_strong = strong
@@ -2012,9 +2074,12 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     layout.not_found = WordsNotFound(f"{found_lines} lines found", at_edge=at_edge, line_count=found_lines) \
         if hypothesis else None
     layout.lengths = [getattr(b, "ink", b.a1 - b.a0) / b.h for b in lines]
-    layout.extra_words = extra
+    layout.extra_words = words_left
     layout.orders_found = orders_found
     layout.numbers_linked = len(linked)
     layout.numbers_read = len(read_numbers)
     layout.anchored = anchored is not None
+    layout.numbers_incoherent = incoherent
+    layout.numbers_checked = checked
+    layout.merged = merged
     return layout

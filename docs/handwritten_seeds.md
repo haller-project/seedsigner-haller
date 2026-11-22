@@ -32,7 +32,10 @@ used.
 2. The photo is read on the device (5 to 9 seconds on a Pi Zero for 12 words,
    see [Timings](#timings)). The progress bar moves at a steady pace from the
    click; the screen shows the photo while the words are searched, then the
-   area of the words with the word being read outlined, and that word.
+   area of the words with the word being read outlined in bright orange, the
+   words already read in the pass outlined in dark orange, and the word being
+   read with its rank. The screen also says the hypothesis tried and the step
+   under way, with its counter.
 3. Status: a seed is announced as **verified** only when the fingerprint
    written with the words is read and matches them (see
    [Trust in a reading](#trust-in-a-reading)). Any other reading is never
@@ -559,10 +562,23 @@ thread, under the progress bar, and luminance only: 0.5 s instead of 1.9 s
 for a color decoding, rotation and conversion to gray, and 5 MB of memory
 instead of 15 MB.
 
-The reading screen is redrawn at most every 0.7 second, with images prepared
-by the reading thread: a redraw costs about 11 ms of processor time on a Pi
-Zero (the transfer to the display takes 37 ms, during which the reading goes
-on).
+The reading screen is redrawn at most every 0.7 second, and when the word
+outlined changes, at most every 0.35 second (`WORD_INTERVAL`), with images
+prepared by the reading thread; it draws only what changed. A redraw takes
+about 40 ms on a Pi Zero, of which about 30 ms are taken from the reading
+(drawing, conversion and the SPI write, which holds the GIL). Measured on a
+Pi Zero with the real display, 3 photos, 2 passes: the reading time with the
+redraw per word is within the noise of the one without it (246.7 s against
+248.1 s in total). The trail shows every word read, even those read faster
+than a redraw.
+
+On a layout not confirmed (a list with numbers missing or contradicting
+each other), `UNCONFIRMED_WORD` sets the text of the word being read:
+`"show"` (default) writes it as on a confirmed layout, `"dim"` in gray,
+`"hide"` shows its rank and outline only. A card, a list with a number on
+every line, and a complete list without any number are confirmed. This
+changes the display only; the stages and counters the engine reports for
+the screen do not change the readings.
 
 
 ## C library

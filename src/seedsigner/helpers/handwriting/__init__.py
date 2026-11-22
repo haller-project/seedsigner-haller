@@ -887,7 +887,16 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             return None, not_found
         if reading.analyze().status == "valid":
             guard(reading)
-        if reading.fingerprint_crop is not None:
+        if reading.fingerprint_crop is not None and getattr(reading.layout, "fingerprint_optional", False):
+            # a row left out across the columns tried as the fingerprint: kept only if it matches a seed read
+            doubtful = set(reading.doubtful)
+            checked = check_fingerprint(reading, pool, progress)
+            if getattr(checked, "verified", False):
+                reading = checked
+            else:
+                reading.doubtful, reading._last = doubtful, None
+                reading.fingerprint_crop, reading.fingerprint = None, None
+        elif reading.fingerprint_crop is not None:
             reading = check_fingerprint(reading, pool, progress)
         if getattr(reading.layout if hasattr(reading, "layout") else None, "fingerprint_hypothesis", False) \
                 and not getattr(reading, "verified", False):

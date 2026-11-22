@@ -1051,7 +1051,7 @@ of `handwriting.h` are tested against those of `native/__init__.py`
 (`tests/test_handwriting_native_checks.py`). The weights stay in
 this repository, since the device works offline; the
 [Haller-1 release](https://github.com/haller-project/haller/releases/tag/haller-1)
-(not published yet) carries the same files with the model card, the recipe
+carries the same files with the model card, the recipe
 and the evaluation report. New weights (Haller-2, or Haller-1.1 without
 retraining) replace the files, the manifest, the reference vectors and the
 table above together.

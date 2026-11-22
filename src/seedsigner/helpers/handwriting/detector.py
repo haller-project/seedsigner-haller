@@ -989,7 +989,7 @@ def row_words(boxes: list[Box], chained: bool = False) -> list[list[Box]] | None
     return words
 
 
-def bridged_columns(boxes: list[Box], numbers: list[Box] = ()) -> tuple[list[list[Box]], list[list[Box]]] | None:
+def bridged_columns(boxes: list[Box]) -> tuple[list[list[Box]], list[list[Box]]] | None:
     """
         Columns of a list whose corridor between two columns is covered only
         by one or two rows at its start or end (a title or a fingerprint
@@ -997,9 +997,8 @@ def bridged_columns(boxes: list[Box], numbers: list[Box] = ()) -> tuple[list[lis
         the columns of the other boxes (group_lines, or grid_columns) if there
         are at least two of them, of a valid number of words, and every row
         left out overlaps a corridor between them, the rows left out together
-        closing every corridor (no gap of COLUMN_GAP heights left in it). A row
-        with a number of `numbers` just before one of its pieces is a row of
-        the list, never left out. The fewest rows left out first (the first, the
+        closing one of them (no gap of COLUMN_GAP heights left in it: the
+        columns on either side are merged). The fewest rows left out first (the first, the
         last, then two): (those columns, the rows left out); None if no such
         set of rows is found.
     """
@@ -1038,11 +1037,8 @@ def bridged_columns(boxes: list[Box], numbers: list[Box] = ()) -> tuple[list[lis
             return max(widest, c1 - edge) < COLUMN_GAP * h
 
         out = [b for i in removed for b in rows[i]]
-        if any(n.middle < b.a0 and n.a1 >= b.a0 - h and abs(n.c - b.c) < SAME_LINE * max(n.h, b.h)
-               for b in out for n in numbers):
-            continue
         if all(any(b.a0 < c1 and b.a1 > c0 for b in rows[i] for c0, c1 in corridors) for i in removed) \
-                and all(closes([(b.a0, b.a1) for b in out], c0, c1) for c0, c1 in corridors):
+                and any(closes([(b.a0, b.a1) for b in out], c0, c1) for c0, c1 in corridors):
             return columns, [rows[i] for i in removed]
     return None
 
@@ -1727,11 +1723,12 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
         aligned = aligned_columns(groups[g])
         if aligned is not None and sum(len(c) for c in aligned) in page.SEED_LENGTHS:
             columns, count = aligned, sum(len(c) for c in aligned)
-    if anchored is None:
+    if anchored is None and not crossed:
         # a title or a fingerprint written across the columns: the list read without it (its boxes are then outside
         # the words, tried as the fingerprint below), if the count is wrong or if it splits the list into more columns
-        # (a count made valid by a column merged into one: the title counted, two words joined into one line)
-        bridged = bridged_columns(groups[g], number_groups.get(g, []))
+        # (a count made valid by a column merged into one: the title counted, two words joined into one line); not in the
+        # second search, whose words scribbled over are already left out
+        bridged = bridged_columns(groups[g])
         if bridged is not None and BRIDGE_ROLES and getattr(fingerprint, "role", None) is not None:
             # lexical signal too (variant): every row left out reads as no word, a label or a fingerprint
             fill_ = int(np.median(np.asarray(image.reduce(16))))

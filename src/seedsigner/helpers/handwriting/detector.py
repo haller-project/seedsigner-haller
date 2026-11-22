@@ -40,6 +40,7 @@
 """
 import copy
 import ctypes
+import io
 import itertools
 import math
 import os
@@ -213,7 +214,7 @@ def load_detector():
     """
     if not _detector:
         lib = native.load()
-        with np.load(DETECTOR_PATH) as data:
+        with np.load(io.BytesIO(native.read_weights(DETECTOR_PATH))) as data:
             net = native.detector({k: np.ascontiguousarray(data[k]) for k in data.files})
         work = np.zeros(-(-lib.hw_detector_work_size(ctypes.byref(net)) // 4), np.int32)
         _detector.append((lib, net, work))
@@ -223,12 +224,15 @@ def load_detector():
 
 def network_maps(image: np.ndarray) -> np.ndarray:
     """
-        Output maps (8, 192, 144) float32 of a grayscale image (384, 288) uint8.
+        Output maps (native.DETECTOR_OUTPUTS = 11, 192, 144) float32 of a
+        grayscale image (384, 288) uint8. Raises ValueError for an image of
+        another shape.
     """
     lib, net, work = load_detector()
     width, height = native.DETECTOR_SIZE
     image = np.ascontiguousarray(image, np.uint8)
-    assert image.shape == (height, width)
+    if image.shape != (height, width):
+        raise ValueError(f"detector input of shape {image.shape}, {(height, width)} expected")
     maps = np.empty((native.DETECTOR_OUTPUTS, height // 2, width // 2), np.float32)
     lib.hw_detector_maps(ctypes.byref(net), image.ctypes.data, work.ctypes.data, maps.ctypes.data)
     return maps

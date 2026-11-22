@@ -12,6 +12,7 @@
     library must reproduce bit for bit (tests/test_handwriting_vectors.py).
 """
 import ctypes
+import io
 import os
 
 import numpy as np
@@ -32,7 +33,7 @@ class WordModel:
     """
     def __init__(self, path: str = MODEL_PATH):
         self.lib = native.load()
-        with np.load(path) as data:
+        with np.load(io.BytesIO(native.read_weights(path))) as data:
             self.network = native.network({k: np.ascontiguousarray(data[k]) for k in data.files})
         self.work = np.zeros(0, np.int32)
 

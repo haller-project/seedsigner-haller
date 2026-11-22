@@ -279,8 +279,9 @@ label (`fingerprint.LABELS`, CTC likelihood of the best label against the
 best BIP39 word, `LABEL_MARGIN`) or, next to a fingerprint, as no word
 (`handwriting.line_role`). Two fingerprint lines are checked together (mean
 of their probabilities, which still sum to 1). At most one fingerprint check
-is made per attempt and at most 3 seeds are checked: the bound of 1e-6 per
-photo below is unchanged. A reading left with rows read as a fingerprint or a
+is made per attempt, and the seeds compared count against the budget of 3 per
+photo (see [Check of the fingerprint](#check-of-the-fingerprint)): the bound
+of 1e-6 per photo is unchanged. A reading left with rows read as a fingerprint or a
 label and not verified is trusted low. A list not found is not read again
 this way: measured on a Pi Zero, it took 26 to 93 s on pages refused
 without it in 4.5 to 33.5 s.
@@ -384,7 +385,8 @@ worst estimated time on a Pi Zero 42.8 → 37.7 s on the real photos.
   at the loose margin; passing it, it is checked against the seeds read,
   and the list is kept as read if it matches none
   (`layout.fingerprint_optional`). One check per search, as on the other
-  paths: the bound on a false verified seed per photo does not change. The
+  paths, within the budget of 3 seeds per photo: the bound on a false
+  verified seed per photo does not change. The
   line stays a word left out of the list until it matches. The outputs of
   the fingerprint network are kept per crop during a reading, and this
   line is checked on its crop only: the loose margin and the check cost
@@ -454,9 +456,25 @@ bytes).
   (`fingerprint.MIN_MATCH_PROBABILITY`). These probabilities sum to 1, so at
   most 1 428 strings reach it: the fingerprint of a wrong seed, uniform over
   2^32 values, matches by chance with a probability of at most 3.3e-7 per
-  seed checked, whatever the calibration of the networks, and a photo, whose
-  one fingerprint line is checked against 3 seeds at most, gets a wrong
-  verified seed with a probability of at most 1e-6. The threshold is the
+  seed checked, whatever the calibration of the networks. A photo gets a
+  wrong verified seed with a probability of at most 3 × 3.3e-7 = 1e-6,
+  because at most 3 (seed, line) pairs are compared over its whole reading
+  (`FingerprintBudget`), not 3 per search: a reading neither verified nor
+  valid is searched a second time without the words that may be crossed out,
+  and two searches of 3 seeds each would allow 6, about 2e-6 (pointed out in a
+  review, 20/11/2026). The first search compares its two most probable seeds
+  at once (`FIRST_SEARCH_CHECKS`; a match spares the second search); when a
+  second search follows, the other candidates of both are compared at the
+  end, the most probable first (log-probability of their words as read),
+  until the budget of 3 is spent; without a second search, the first one
+  compares its third candidate as before. A seed already compared with
+  the same line is not compared again. Measured on the frozen benches
+  (22/11/2026, 21 benches with those of the abbreviated words): the same
+  readings, verified seeds and exact seeds on every page as with 3 seeds per
+  search, no false verified seed; the readings of the 261 real photos are
+  identical to the byte. 18 simulated pages verified by their third
+  candidate now go through the second search first (+3.8 s at most on a Pi
+  Zero, estimated). The threshold is the
   lowest one with that bound for the number of candidates that verified the
   most right seeds on the tuning pages (1 to 16 candidates measured): 3. The
   right seed was among the first 3 candidates on all but 6 of 1 698 pages
@@ -919,7 +937,16 @@ quantization. Photos taken by users are never used.
 weights (`haller-1`), the SHA-256 of each weight file and its release page;
 `tests/test_handwriting_weights.py` checks that every weight file is listed
 there, matches its digest, has its reference vectors and is the one the
-engine loads, and that this page quotes the same digests. The weights stay in
+engine loads, and that this page quotes the same digests. The device checks
+the digest too, each time it loads a weight file (`native.read_weights`,
+about 1.5 MB read once per start): a file that is not listed or does not
+match is not loaded, and the reading stops with an error
+(`native.WeightsError`). Before the arrays are given to the C library, the
+size of each one is checked against the shape of its layer (channels × 3 × 3
+× inputs, `native.network` and `native.detector`), so that a damaged file
+gives an error rather than a read beyond the end of an array; the constants
+of `handwriting.h` are tested against those of `native/__init__.py`
+(`tests/test_handwriting_native_checks.py`). The weights stay in
 this repository, since the device works offline; the
 [Haller-1 release](https://github.com/haller-project/haller/releases/tag/haller-1)
 (not published yet) carries the same files with the model card, the recipe

@@ -270,6 +270,13 @@ fingerprints are left out; through the whole reading of every bench, none of
 line of a 24-word card read as a list was left out). A fingerprint of digits only, which the second network reads poorly, is
 often kept as a line, and the list is then reported with its number of lines
 as before. The line left out is kept with the layout (`layout.fingerprint`).
+When no line passes the thresholds, the one line the fingerprint network
+reads as 8 hexadecimal digits (`LOOSE_FINGERPRINT_MARGIN`) is left out as a
+hypothesis. If its fingerprint matches a seed read, the seed is verified;
+otherwise the list read without it is kept with a fingerprint that does not
+match (`HYPOTHESIS_KEPT`): every word uncertain, trust low, never verified.
+Before 22/11/2026 such a list was reported as not found, even with every word
+read right (a fingerprint whose first digits were misread).
 The official SeedSigner card has no such line: its fingerprint box is on the
 back.
 

@@ -90,7 +90,7 @@ TEMPERATURES = {FIRST: 2.2, LOWERCASE: 2.2, BLEND: 2.2}
 # crops, networks of the reading) is an abbreviated list: its words are read again with ABBREVIATED_PAGE_PENALTY (the
 # outputs of the networks and of the decoder are reused). Lists may mix both forms (words of 3 or 4 letters are always
 # written in full). Chosen on the tuning pages only (real photos DEV and site, DEVR, FPDEV, ETIQDEV, 200 simulated
-# abbreviated pages; 22/11/2026, docs/mots-abreges.md): an evidence of 0 lost 4 exact seeds of DEVR, 3 none.
+# abbreviated pages; 22/11/2026): an evidence of 0 lost 4 exact seeds of DEVR, 3 none.
 ABBREVIATED_PAGE_PENALTY = 0.0
 ABBREVIATION_EVIDENCE = 3.0
 ABBREVIATED_MIN_WORDS = 3
@@ -133,7 +133,7 @@ FINGERPRINT_RESCUE_MARGIN = 10.0
 LOOSE_FINGERPRINT_MARGIN = 0.0
 # A fingerprint hypothesis whose fingerprint matches no seed read: with HYPOTHESIS_KEPT, the list read without that
 # line is kept as a reading whose fingerprint does not match (every word uncertain, TRUST_LOW), as for a line that
-# passes the thresholds; without it (before task-4497), the list is not found. The line taken out is the only one
+# passes the thresholds; without it, the list is not found. The line taken out is the only one
 # left out of a list of one line too many, so that no other layout of the same words has a valid count (a grid of
 # 24 words in 3 numbered columns, its fingerprint above it and misread, was not found; 22/11/2026).
 # Frozen benches against 978f1fa: 46 exact seeds gained (1 real), none lost, no verified reading changed.

@@ -69,7 +69,7 @@ ALL = -2                      # document made of every word found, cards and fre
 MIN_OTHER_WORDS = 6           # words of another document making every word uncertain
 CARD_SHAPE = False            # (variant, off) a card kernel holds a document only if it has the shape of a card
                               # (Detection.shaped); on the benches it frees the words of SeedSigner cards cut by the
-                              # frame (task-4434: 16 seeds lost on cadrages and devr)
+                              # frame (16 seeds lost on the benches of badly framed photos)
 CARD_MIN_PIXELS = 3000        # output pixels of a card kernel with the shape of a card (cards read on the photos of the
                               # site: 4 700 to 23 000; parts of a sheet taken for a card: 150 to 2 500)
 CARD_MIN_COMPACTNESS = 0.55   # share of its oriented bounding rectangle covered by such a kernel (cards: 0.61 to 0.96;
@@ -82,7 +82,7 @@ ZOOM_SHARE = 0.5              # documents covering less of the photo are detecte
                               # the detector of 21/11/2026)
 ZOOM_MARGIN = 0.15            # margin of that region, share of its size on each side
 ZOOM_STRAY_CARDS = True       # (variant, off when False) a card kernel without the shape of a card (card_shaped) holding
-                              # fewer than MIN_GROUP_WORDS words widens the region of the document. False (task-4497):
+                              # fewer than MIN_GROUP_WORDS words widens the region of the document. False (tried on 22/11/2026):
                               # such kernels left out, so that a small list on a landscape photo is detected again
                               # closer; on the frozen benches 21 exact seeds gained and 23 lost, 13 verified lost: kept
                               # as it was
@@ -2098,8 +2098,8 @@ def find_words(image: Image.Image, step=page.no_step, fingerprint=None, crossed:
     layout.fingerprint_single = optional and loose_line is not None
     # The second reading without label or fingerprint rows (read_seed, `extra`) is offered only when every word box is
     # on a line of the list: a word left out (a title, words of another document) closes it. This was the behaviour
-    # since 986e493, through a variable `extra` reused for the words left out; written out here. Offering it also when
-    # words are left out (task-4434, C6) gained no seed on the frozen benches and cost up to 88 s more on a Pi Zero
+    # before, through a variable `extra` reused for the words left out; written out here. Offering it also when
+    # words are left out gained no seed on the frozen benches and cost up to 88 s more on a Pi Zero
     # (a photo already read, read again for nothing).
     layout.extra_lines = not words_left and g < 0 and anchored is None and spare is None and fingerprint is not None \
         and len(linked) >= MIN_ANCHOR_NUMBERS and len(linked) < count and bool(extra_line_sets(groups[g]))

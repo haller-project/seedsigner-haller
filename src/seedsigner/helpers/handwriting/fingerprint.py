@@ -51,8 +51,7 @@ LABELS = ("fingerprint", "masterfingerprint", "masterfp", "fp", "xfp", "mfp", "s
 # lines the searches read. Chosen on 21/11/2026 as the lowest threshold whose bound per
 # photo is at most 1e-6, for the number of candidates that verified the most
 # right seeds on the tuning pages (simulated lists with a fingerprint kept
-# apart from the tests, and the development half of the real photos);
-# docs/empreinte.md, section task-4326.
+# apart from the tests, and the development half of the real photos).
 MIN_MATCH_PROBABILITY = 7e-4
 
 # A digit missed or one too many in the reading of the line (a digit taken

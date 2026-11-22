@@ -131,6 +131,13 @@ FINGERPRINT_RESCUE_MARGIN = 10.0
 # above, its 9 written with a tail and read as a g by the word networks): fingerprint line at +5, word lines of the
 # same photos at -26 or below.
 LOOSE_FINGERPRINT_MARGIN = 0.0
+# A fingerprint hypothesis whose fingerprint matches no seed read: with HYPOTHESIS_KEPT, the list read without that
+# line is kept as a reading whose fingerprint does not match (every word uncertain, TRUST_LOW), as for a line that
+# passes the thresholds; without it (before task-4497), the list is not found. The line taken out is the only one
+# left out of a list of one line too many, so that no other layout of the same words has a valid count (a grid of
+# 24 words in 3 numbered columns, its fingerprint above it and misread, was not found; 22/11/2026).
+# Frozen benches against 978f1fa: 46 exact seeds gained (1 real), none lost, no verified reading changed.
+HYPOTHESIS_KEPT = True
 # Rows at the start or the end of a list that may not be words (detector.extra_line_sets), read when the list is not
 # found or is numbered on most of its lines but not all (read_seed): a row is a label if its best label
 # (fingerprint.LABELS) reads better than its best BIP39 word by LABEL_MARGIN and falls short of the free reading of
@@ -1156,7 +1163,8 @@ def read_seed(image: Image.Image, progress=None, on_word=None, on_stage=None) ->
                 reading.fingerprint_crop, reading.fingerprint = None, None
         elif reading.fingerprint_crop is not None:
             reading = check_fingerprint(reading, pool, progress, budget=budget, now=now[crossed])
-        if getattr(reading.layout if hasattr(reading, "layout") else None, "fingerprint_hypothesis", False) \
+        if not HYPOTHESIS_KEPT \
+                and getattr(reading.layout if hasattr(reading, "layout") else None, "fingerprint_hypothesis", False) \
                 and not getattr(reading, "verified", False):
             # a line left out as a fingerprint hypothesis whose fingerprint matches no seed read: the list has one
             # line too many, as without the hypothesis

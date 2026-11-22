@@ -158,6 +158,15 @@ class Analysis:
         return [list(words) for _, words in self._valid[:n]]
 
 
+    def valid_seed_log_probabilities(self, n: int) -> list[float]:
+        """
+            Log-probability of each of the n seeds of valid_seeds(n), the
+            product of the probabilities of its words as read (checksum left
+            out): comparable between readings of the same photo.
+        """
+        return [log_p for log_p, _ in self._valid[:n]]
+
+
     def word_probability(self, k: int, word: str) -> float:
         """
             Probability that `word` is at position k, given the readings and the

@@ -25,6 +25,7 @@
     its trust level (see Trust) only says how often such readings are fully
     right.
 """
+import hashlib
 import math
 import threading
 
@@ -281,6 +282,7 @@ class SeedReading:
         self.fingerprint = None
         self.verified = False
         self.extra_lines = False
+        self.numbers_incoherent = False
         self._last = None
 
 
@@ -350,6 +352,9 @@ class SeedReading:
         if self.extra_lines:
             # rows of the list read as a fingerprint or a label rather than as words, not verified without them
             return Trust(TRUST_LOW)
+        if self.numbers_incoherent:
+            # numbers read that contradict the order of the words (detector.NUMBER_CHECK)
+            return Trust(TRUST_LOW)
         if analysis.status == "valid":
             return Trust(TRUST_HIGH)
         if analysis.status == "uncertain" and analysis.confidence >= MIN_MEDIUM_SEED_PROBABILITY:
@@ -408,6 +413,19 @@ def log_softmax(scores: np.ndarray) -> np.ndarray:
 
 
 
+# Word crops read during one reading of a photo (read_seed), by content: a crop read again by another search of the
+# same photo (crossed out, extra lines, merged) reuses its ink map and the outputs of the networks, which depend on
+# the crop alone. Emptied at the start and the end of read_seed.
+WORD_CACHE = True
+_crop_cache = {}   # key of a crop: ink map or None
+_score_cache = {}  # (key, model): (outputs of the network, word scores)
+
+
+def crop_key(crop: Image.Image) -> bytes:
+    return hashlib.blake2b(crop.tobytes(), digest_size=16, person=b"%dx%d" % crop.size).digest()
+
+
+
 class LayoutReader:
     """
         Reads the words of `layout` with either network or their blend; the
@@ -419,6 +437,7 @@ class LayoutReader:
         self.scores = {}   # (k, variant, model): word scores
         self.log_probs = {}  # (k, variant, model): outputs of the network
         self.numbers = {}  # k: (number, probability) or None
+        self.keys = {}     # (k, variant): key of the crop (WORD_CACHE)
         self._alternative = []
 
 
@@ -444,10 +463,16 @@ class LayoutReader:
         if ink is None:
             return None
         if (k, variant, model) not in self.scores:
-            first, decoder, lowercase = load_engine()
-            network = lowercase if model else first
-            self.log_probs[(k, variant, model)] = network.log_probs(ink)
-            self.scores[(k, variant, model)] = decoder.scores(self.log_probs[(k, variant, model)])
+            cached = (self.keys[(k, variant)], model) if WORD_CACHE and (k, variant) in self.keys else None
+            if cached is not None and cached in _score_cache:
+                self.log_probs[(k, variant, model)], self.scores[(k, variant, model)] = _score_cache[cached]
+            else:
+                first, decoder, lowercase = load_engine()
+                network = lowercase if model else first
+                self.log_probs[(k, variant, model)] = network.log_probs(ink)
+                self.scores[(k, variant, model)] = decoder.scores(self.log_probs[(k, variant, model)])
+                if cached is not None:
+                    _score_cache[cached] = self.log_probs[(k, variant, model)], self.scores[(k, variant, model)]
         return self.scores[(k, variant, model)]
 
 
@@ -460,7 +485,13 @@ class LayoutReader:
         words = load_engine()[1].words
         if (k, variant) not in self.inks:
             crop = self.layout.crop(k, variant)
-            self.inks[(k, variant)] = (crop, None if crop is None else normalize_word(crop))
+            if crop is not None and WORD_CACHE:
+                key = self.keys[(k, variant)] = crop_key(crop)
+                if key not in _crop_cache:
+                    _crop_cache[key] = normalize_word(crop)
+                self.inks[(k, variant)] = (crop, _crop_cache[key])
+            else:
+                self.inks[(k, variant)] = (crop, None if crop is None else normalize_word(crop))
         crop, ink = self.inks[(k, variant)]
         if crop is None:
             return None
@@ -837,6 +868,8 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
         progress.step(LOAD_COST)
     gray = image.convert("L")
     detector._detections.clear()
+    _crop_cache.clear()
+    _score_cache.clear()
 
     def spare_line(crop):
         progress.step(WORD_COST + OTHER_WORD_COST)
@@ -861,6 +894,28 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
             return detector.find_words(image, step, fingerprint=fingerprint, crossed=crossed)
 
         reading, _, not_found = search(find, gray, progress, on_word, pool, spare_line)
+        if not crossed and reading is not None and getattr(reading.layout, "numbers_incoherent", False) \
+                and not getattr(reading.layout, "cards_held", True):
+            # no card kernel holds words: the list read without them is the same one
+            reading.numbers_incoherent = True
+            reading.mark_disputed()
+        elif not crossed and reading is not None and getattr(reading.layout, "numbers_incoherent", False):
+            # numbers read that contradict the order of the words: read again as one list with the words of every
+            # document (a part of the sheet taken for a card); kept if its numbers are read and agree with its order,
+            # otherwise the first reading is kept with every word uncertain
+            merged_pool = []
+
+            def find_merged(image, step, fingerprint):
+                return detector.find_words(image, step, fingerprint=fingerprint, merged=True)
+
+            other, _, _ = search(find_merged, gray, progress, on_word, merged_pool, spare_line)
+            if other is not None and not other.layout.numbers_incoherent \
+                    and other.layout.numbers_checked >= detector.MIN_NUMBERS_READ:
+                reading = other
+                pool[:] = merged_pool
+            else:
+                reading.numbers_incoherent = True
+                reading.mark_disputed()
         if not crossed and (reading is not None and getattr(reading.layout, "extra_lines", False)
                             and reading.fingerprint_crop is None and not getattr(reading, "verified", False)):
             # a list numbered on most of its lines, with lines without a number: read again without one or two rows
@@ -922,6 +977,8 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
                 reading = other
     finally:
         detector._detections.clear()
+        _crop_cache.clear()
+        _score_cache.clear()
     if reading is None:
         raise not_found
     progress.report(1.0)

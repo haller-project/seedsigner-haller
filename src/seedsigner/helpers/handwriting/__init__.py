@@ -159,6 +159,12 @@ NO_WORD_FIT = -25.0
 # Zero (PBKDF2-HMAC-SHA512, 2048 rounds, 0.062 s; master key and HASH160,
 # 0.005 s; measured with embit on 20/11/2026) and its check, seconds.
 FINGERPRINT_CANDIDATES = 3
+# Seeds of the first search compared at once with its fingerprint line, before a second search may be made (see
+# FingerprintBudget): a match spares that search; the others are left for the end, with those of the second search.
+# Chosen on the 19 frozen benches (22/11/2026): with 1 or 2, the same readings, verified and exact seeds on every page
+# as with 3 seeds per search; with 1, 163 pages verified by their second or third seed are searched a second time
+# before it is compared (+3 to +7 s on a Pi Zero), with 2, 18 pages (+3.8 s at most), none of them a real photo.
+FIRST_SEARCH_CHECKS = 2
 FINGERPRINT_COST = 0.1
 # The fingerprint line is read three times: as cut, and without FINGERPRINT_TRIM of its height at the top, then at
 # the bottom; the probability of a fingerprint is the mean of the three (FingerprintCheck), which still sums to 1 over
@@ -982,9 +988,10 @@ def read_seed(image: Image.Image, progress=None, on_word=None) -> SeedReading:
     spare_line.role = role
 
     budget = FingerprintBudget()
-    # the first search compares its most probable seed at once (a match spares the second search), the second one none:
+    # the first search compares its FIRST_SEARCH_CHECKS most probable seeds at once (a match spares the second
+    # search), the second one none:
     # their other candidates are compared together at the end (see FingerprintBudget)
-    now = {False: 1, True: 0}
+    now = {False: FIRST_SEARCH_CHECKS, True: 0}
 
     def attempt(crossed: bool):
         pool = []
@@ -1103,7 +1110,8 @@ class FingerprintBudget:
         FINGERPRINT_CANDIDATES times that.
 
         A check made while a second search may follow (`now`) compares its
-        most probable seed only; its other candidates are `pending`. If that
+        `now` most probable seeds only (FIRST_SEARCH_CHECKS); its other
+        candidates are `pending`. If that
         check had matched, the second search would not have been made: a
         candidate compared then could stop it, and the pairs that may verify
         a photo would be those of both searches. The pending candidates of

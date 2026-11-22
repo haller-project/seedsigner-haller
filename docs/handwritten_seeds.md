@@ -396,6 +396,45 @@ more on the photos of the site (a pencil fingerprint under the list, a
 fingerprint after the last word); worst estimated time on a Pi Zero 37.7 →
 37.8 s on the real photos.
 
+### Words abbreviated to 4 letters
+
+Many backups, metal plates above all, hold only the first 4 letters of each
+word: they are enough to tell the 2048 words of the BIP39 English list apart.
+No abbreviated form equals another full word, so each one leads back to a
+single word.
+
+- **Decoder** (`decoder.ABBREVIATIONS`): the 1 503 abbreviated forms of the
+  words longer than 4 letters are nodes of the prefix tree the decoder
+  already walks; they add outputs, no state. The score of a word combines
+  its two forms, `logaddexp(full, abbreviated − penalty)`. With
+  `ABBREVIATIONS = False`, the scores are those of the engine without
+  abbreviations, bit for bit.
+- **Two levels.** Every word may be read abbreviated with a high penalty
+  (`ABBREVIATION_PENALTY`, 9): words written in full read as before, a lone
+  clear abbreviation still passes. A list where at least 3 words, and at
+  least a quarter of the words (`ABBREVIATED_SHARE`), read better as an
+  abbreviation than as any full word by `ABBREVIATION_EVIDENCE` (3) is an
+  abbreviated list: all its words are read again with
+  `ABBREVIATED_PAGE_PENALTY` (0), from the outputs already computed. A
+  fixed low penalty word by word lost seeds on real photos: the forms of 4
+  letters compete with the short words written in full (`exit` read
+  `exil`, exile).
+- The candidates stay full words: the screen shows the full word, and
+  `WordReading.abbreviated` tells which candidates were read abbreviated.
+  A word read abbreviated counts 4 letters for the stretched word guard.
+  The trust in a reading keeps its rules: a form of 4 letters carries less
+  evidence, its probabilities and the trust level come out lower.
+
+Measured on the 20 frozen benches (22/11/2026, on 2c2a509): no false
+verified seed, the real photos read the same photo by photo (261 photos),
+no loss; 3 to 5 more exact seeds on four simulated benches of layouts. On
+400 simulated pages written abbreviated (kept out of any tuning): 0 → 108
+exact seeds, 1 217 → 2 385 right words, no false verified or false valid
+seed; most of the rest are lists the detector does not find (short words in
+spaced capitals, which the weights of Haller-1 never saw). Pi Zero: same
+time on its real photos, −23 % on abbreviated pages, +4 % on the longest
+simulated pages (the forms are combined in numpy for each crop).
+
 ### Check of the fingerprint
 
 When a fingerprint line was left out, it is read again by the fingerprint
